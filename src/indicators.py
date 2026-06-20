@@ -7,27 +7,40 @@ import pandas as pd
 def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     """Return a clean OHLCV dataframe with lowercase columns.
 
-    yfinance sometimes returns MultiIndex columns. This function keeps the app
-    resilient across single-ticker and multi-ticker downloads.
+    yfinance can return either normal columns or MultiIndex columns.
+    With auto_adjust=False it often returns both Close and Adj Close.
+    If Adj Close is renamed to close while Close already exists, pandas creates
+    duplicate close columns and rolling calculations fail. This function keeps
+    one clean OHLCV set and ignores Adj Close when Close is available.
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
     data = df.copy()
-    if isinstance(data.columns, pd.MultiIndex):
-        # For single ticker downloads, the first level usually contains OHLCV.
-        data.columns = [str(c[0]).lower() for c in data.columns]
-    else:
-        data.columns = [str(c).lower().replace(" ", "_") for c in data.columns]
 
-    mapping = {
-        "adj_close": "close",
-        "adj close": "close",
-    }
-    data = data.rename(columns=mapping)
+    if isinstance(data.columns, pd.MultiIndex):
+        # For single-ticker downloads, first level is usually OHLCV/Adj Close.
+        # Example: ("Close", "000660.KS"). Keep only the OHLCV name.
+        data.columns = [str(c[0]).strip().lower().replace(" ", "_") for c in data.columns]
+    else:
+        data.columns = [str(c).strip().lower().replace(" ", "_") for c in data.columns]
+
+    # Prefer real Close. Use Adj Close only if Close is missing.
+    if "close" not in data.columns and "adj_close" in data.columns:
+        data = data.rename(columns={"adj_close": "close"})
+
+    # Remove duplicate columns defensively. This fixes the common Close + Adj Close issue.
+    data = data.loc[:, ~data.columns.duplicated()].copy()
+
     keep = [c for c in ["open", "high", "low", "close", "volume"] if c in data.columns]
-    data = data[keep].dropna(subset=["close"]) if "close" in data.columns else pd.DataFrame()
-    return data
+    if "close" not in keep:
+        return pd.DataFrame()
+
+    data = data[keep].copy()
+    data["close"] = pd.to_numeric(data["close"], errors="coerce")
+    if "volume" in data.columns:
+        data["volume"] = pd.to_numeric(data["volume"], errors="coerce")
+    return data.dropna(subset=["close"])
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
