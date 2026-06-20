@@ -110,3 +110,8 @@ NVDA,엔비디아,US,반도체,AI GPU,95,70,90,88,55,AI GPU 핵심
 앱이 느리면 사이드바에서 `KRX 실제 수급/공매도 사용`을 끄면 됩니다. KRX 데이터는 종목 수가 많으면 로딩이 오래 걸릴 수 있습니다.
 
 `pykrx` 또는 KRX 조회가 실패해도 앱은 꺼지지 않고 수동 점수로 대체합니다.
+
+
+## v5.4 수정 사항
+
+Streamlit Cloud Python 3.12 환경에서 `pykrx`가 `pkg_resources`를 찾지 못해 수급/공매도 데이터가 `데이터없음`으로 표시되는 문제를 수정했습니다. `requirements.txt`에 `setuptools`와 `wheel`을 명시적으로 추가했습니다.

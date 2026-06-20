@@ -36,3 +36,6 @@
 - 장중: 가격, 거래량, RSI, 손절선 중심
 - 장마감 후: 기관/외국인/연기금, 공매도, 공시 중심
 - 실제 주문 전: 증권사 원자료 확인 필수
+
+
+- v5.4: Streamlit Cloud에서 pykrx의 pkg_resources 의존성 문제를 해결하기 위해 setuptools/wheel 추가.
