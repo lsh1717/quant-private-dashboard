@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from src.data_sources import fetch_price_history, load_keywords, load_watchlist, news_metrics
 from src.indicators import add_indicators, latest_snapshot
 from src.scoring import build_trade_plan, manual_structure_score, news_score, technical_score
-from src.krx_sources import build_flow_pack
+from src.krx_sources import build_flow_pack, investor_flow_score, investor_flow_signal, short_score, short_signal
 
 load_dotenv()
 BASE_DIR = Path(__file__).parent
@@ -78,6 +78,167 @@ def cached_flow_pack(ticker: str, enabled: bool) -> dict:
             "composite_supply_score": 50.0,
         }
 
+
+
+
+def _ticker_keys(ticker: str) -> list[str]:
+    """Return matching keys for yfinance/KRX style tickers."""
+    t = str(ticker).strip().upper()
+    keys = [t]
+    for suffix in [".KS", ".KQ"]:
+        if t.endswith(suffix):
+            keys.append(t[: -len(suffix)])
+    if len(t) == 6 and t.isdigit():
+        keys.extend([f"{t}.KS", f"{t}.KQ"])
+    return list(dict.fromkeys(keys))
+
+
+def _to_number(value):
+    """Parse numbers from KRX/export CSV cells.
+
+    Supports plain numbers, comma separated values, and simple Korean units
+    like 12.3억 / 1.2조. Blank cells return NaN.
+    """
+    try:
+        if value is None or pd.isna(value):
+            return pd.NA
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if text in ["", "-", "None", "nan", "NaN"]:
+            return pd.NA
+        sign = -1 if text.startswith("-") else 1
+        text_clean = text.replace("+", "").replace("-", "").replace(",", "").replace("원", "").strip()
+        mult = 1.0
+        if text_clean.endswith("조"):
+            mult = 1_0000_0000_0000
+            text_clean = text_clean[:-1]
+        elif text_clean.endswith("억"):
+            mult = 1_0000_0000
+            text_clean = text_clean[:-1]
+        elif text_clean.endswith("만"):
+            mult = 1_0000
+            text_clean = text_clean[:-1]
+        return sign * float(text_clean) * mult
+    except Exception:
+        return pd.NA
+
+
+def _col(df: pd.DataFrame, names: list[str]) -> str | None:
+    lowered = {str(c).strip().lower(): c for c in df.columns}
+    for name in names:
+        key = name.strip().lower()
+        if key in lowered:
+            return lowered[key]
+    for c in df.columns:
+        cstr = str(c).strip().lower()
+        for name in names:
+            if name.strip().lower() in cstr:
+                return c
+    return None
+
+
+def load_manual_supply_csv(uploaded_file) -> dict[str, dict]:
+    """Load optional user-supplied investor/short CSV.
+
+    Required ticker column: ticker / 티커 / 종목코드.
+    Optional numeric columns:
+    기관5일, 기관20일, 외국인5일, 외국인20일, 연기금5일, 연기금20일,
+    공매도비중%, 공매도잔고비중%, 잔고증감5일%p.
+    """
+    if uploaded_file is None:
+        return {}
+    try:
+        df = pd.read_csv(uploaded_file)
+    except UnicodeDecodeError:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, encoding="cp949")
+    except Exception as exc:
+        st.sidebar.error(f"수급 CSV 읽기 실패: {exc}")
+        return {}
+    ticker_col = _col(df, ["ticker", "티커", "종목코드", "code", "코드"])
+    if ticker_col is None:
+        st.sidebar.error("수급 CSV에 ticker/티커/종목코드 컬럼이 필요합니다.")
+        return {}
+
+    colmap = {
+        "inst_5d": _col(df, ["기관5일", "기관_5일", "inst_5d", "institution_5d"]),
+        "inst_20d": _col(df, ["기관20일", "기관_20일", "inst_20d", "institution_20d"]),
+        "foreign_5d": _col(df, ["외국인5일", "외국인_5일", "foreign_5d"]),
+        "foreign_20d": _col(df, ["외국인20일", "외국인_20일", "foreign_20d"]),
+        "pension_5d": _col(df, ["연기금5일", "연기금_5일", "pension_5d"]),
+        "pension_20d": _col(df, ["연기금20일", "연기금_20일", "pension_20d"]),
+        "short_ratio_latest": _col(df, ["공매도비중%", "공매도비중", "short_ratio_latest"]),
+        "short_balance_ratio_latest": _col(df, ["공매도잔고비중%", "공매도잔고비중", "short_balance_ratio_latest"]),
+        "short_balance_ratio_change_5d": _col(df, ["잔고증감5일%p", "잔고증감5일", "short_balance_ratio_change_5d"]),
+    }
+    out: dict[str, dict] = {}
+    for _, r in df.iterrows():
+        raw = str(r.get(ticker_col, "")).strip().upper()
+        if not raw:
+            continue
+        vals = {}
+        for key, c in colmap.items():
+            vals[key] = _to_number(r.get(c)) if c is not None else pd.NA
+        for key in _ticker_keys(raw):
+            out[key] = vals
+    return out
+
+
+def manual_supply_pack(ticker: str, manual_map: dict[str, dict]) -> dict | None:
+    vals = None
+    for key in _ticker_keys(ticker):
+        if key in manual_map:
+            vals = manual_map[key]
+            break
+    if vals is None:
+        return None
+
+    flow = {
+        "available": False,
+        "reason": "수동 CSV에 수급값 없음",
+        "source": "수동 CSV",
+        "inst_5d": vals.get("inst_5d", pd.NA),
+        "inst_20d": vals.get("inst_20d", pd.NA),
+        "foreign_5d": vals.get("foreign_5d", pd.NA),
+        "foreign_20d": vals.get("foreign_20d", pd.NA),
+        "pension_5d": vals.get("pension_5d", pd.NA),
+        "pension_20d": vals.get("pension_20d", pd.NA),
+        "inst_pos_days_5d": 0,
+        "foreign_pos_days_5d": 0,
+        "pension_pos_days_20d": 0,
+    }
+    important = [flow["inst_5d"], flow["inst_20d"], flow["foreign_5d"], flow["foreign_20d"], flow["pension_20d"]]
+    if any(pd.notna(x) for x in important):
+        flow["available"] = True
+        flow["reason"] = "수동 CSV 사용"
+        flow["flow_score"] = investor_flow_score(flow)
+        flow["flow_signal"] = investor_flow_signal(flow)
+
+    short = {
+        "available": False,
+        "reason": "수동 CSV에 공매도값 없음",
+        "source": "수동 CSV",
+        "short_ratio_latest": vals.get("short_ratio_latest", pd.NA),
+        "short_balance_ratio_latest": vals.get("short_balance_ratio_latest", pd.NA),
+        "short_balance_ratio_change_5d": vals.get("short_balance_ratio_change_5d", pd.NA),
+    }
+    if any(pd.notna(short.get(k)) for k in ["short_ratio_latest", "short_balance_ratio_latest", "short_balance_ratio_change_5d"]):
+        short["available"] = True
+        short["reason"] = "수동 CSV 사용"
+        short["short_score"] = short_score(short)
+        short["short_signal"] = short_signal(short)
+
+    auto_flow_score = float(flow.get("flow_score", 50.0)) if flow.get("available") else 50.0
+    short_s = float(short.get("short_score", 50.0)) if short.get("available") else 50.0
+    composite = max(0, min(100, auto_flow_score * 0.70 + short_s * 0.30))
+    return {
+        "flow": flow,
+        "short": short,
+        "auto_flow_score": auto_flow_score,
+        "short_score": short_s,
+        "composite_supply_score": composite,
+    }
 
 def format_price(x: float) -> str:
     try:
@@ -378,6 +539,15 @@ uploaded = st.sidebar.file_uploader("관심종목 CSV 교체", type=["csv"])
 if uploaded is not None:
     watchlist = pd.read_csv(uploaded)
 
+manual_supply_upload = st.sidebar.file_uploader(
+    "수급/공매도 CSV 직접 업로드",
+    type=["csv"],
+    help="자동 KRX 조회가 안 될 때 사용합니다. ticker, 기관5일, 외국인5일, 연기금20일, 공매도비중%, 공매도잔고비중% 컬럼을 넣으면 됩니다.",
+)
+manual_supply_map = load_manual_supply_csv(manual_supply_upload)
+if manual_supply_map:
+    st.sidebar.success(f"수동 수급 CSV {len(manual_supply_map)}개 티커 인식")
+
 sector_filter = st.sidebar.multiselect("섹터 필터", sorted(watchlist["sector"].unique().tolist()), default=[])
 status_filter = st.sidebar.multiselect("상태 필터", ["진입가능", "진입대기", "관심", "관찰", "추격금지", "손절위험", "데이터없음"], default=[])
 action_filter = st.sidebar.multiselect(
@@ -408,12 +578,16 @@ for i, row in watchlist.iterrows():
     news_data[ticker] = articles
     ns = news_score(article_count, keyword_hits)
     flow_pack = cached_flow_pack(ticker, use_krx_flow)
+    manual_pack = manual_supply_pack(ticker, manual_supply_map)
+    if manual_pack is not None:
+        # 수동 CSV가 있으면 자동 KRX 조회 결과보다 우선합니다.
+        flow_pack = manual_pack
     plan = build_trade_plan(row, snap, structure, tech, ns, flow_pack=flow_pack)
     flow = flow_pack.get("flow", {}) or {}
     short = flow_pack.get("short", {}) or {}
 
-    flow_reason = "조회성공" if flow.get("available") else str(flow.get("reason", "데이터없음"))
-    short_reason = "조회성공" if short.get("available") else str(short.get("reason", "데이터없음"))
+    flow_reason = str(flow.get("reason") or flow.get("source") or "조회성공") if flow.get("available") else str(flow.get("reason", "데이터없음"))
+    short_reason = str(short.get("reason") or short.get("source") or "조회성공") if short.get("available") else str(short.get("reason", "데이터없음"))
 
     rows.append(
         {
@@ -529,7 +703,7 @@ st.dataframe(
 )
 
 with st.expander("KRX 수급/공매도 데이터 진단", expanded=False):
-    st.caption("수급이 데이터없음으로 보일 때는 여기서 원인을 확인하세요. 해외주식은 KRX 대상이 아니며, Streamlit Cloud에서 KRX 접속이 실패할 수도 있습니다.")
+    st.caption("수급이 데이터없음으로 보일 때는 여기서 원인을 확인하세요. 해외주식은 KRX 대상이 아니며, Streamlit Cloud에서 KRX 접속이 실패할 수도 있습니다. 자동 조회가 계속 비면 사이드바의 수급/공매도 CSV 직접 업로드를 사용하세요.")
     diag_cols = ["종목", "티커", "수급판정", "수급데이터상태", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%"]
     st.dataframe(
         result[diag_cols].style.format({
