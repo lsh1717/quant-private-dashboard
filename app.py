@@ -412,6 +412,9 @@ for i, row in watchlist.iterrows():
     flow = flow_pack.get("flow", {}) or {}
     short = flow_pack.get("short", {}) or {}
 
+    flow_reason = "조회성공" if flow.get("available") else str(flow.get("reason", "데이터없음"))
+    short_reason = "조회성공" if short.get("available") else str(short.get("reason", "데이터없음"))
+
     rows.append(
         {
             "상태": plan.status,
@@ -438,7 +441,9 @@ for i, row in watchlist.iterrows():
             "공매도점수": round(plan.short_score, 1),
             "종합수급점수": round(plan.supply_score, 1),
             "수급판정": plan.supply_signal,
+            "수급데이터상태": flow_reason,
             "공매도판정": plan.short_signal,
+            "공매도데이터상태": short_reason,
             "기관5일": flow.get("inst_5d"),
             "외국인5일": flow.get("foreign_5d"),
             "연기금20일": flow.get("pension_20d"),
@@ -497,7 +502,7 @@ if not urgent.empty:
     )
 
 st.subheader("오늘의 후보")
-view_cols = ["행동신호", "알림우선순위", "상태", "종합점수", "종목", "티커", "섹터", "테마", "현재가", "손절가", "강제손절가", "RSI", "거래량배율", "20일수익률%", "구조점수", "종합수급점수", "실제수급점수", "수동수급기대", "수급판정", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도비중%", "공매도잔고비중%", "차트점수", "뉴스점수", "피보구간", "경고"]
+view_cols = ["행동신호", "알림우선순위", "상태", "종합점수", "종목", "티커", "섹터", "테마", "현재가", "손절가", "강제손절가", "RSI", "거래량배율", "20일수익률%", "구조점수", "종합수급점수", "실제수급점수", "수동수급기대", "수급판정", "수급데이터상태", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%", "차트점수", "뉴스점수", "피보구간", "경고"]
 st.dataframe(
     result[view_cols].style.format({
         "현재가": format_price,
@@ -522,6 +527,21 @@ st.dataframe(
     use_container_width=True,
     hide_index=True,
 )
+
+with st.expander("KRX 수급/공매도 데이터 진단", expanded=False):
+    st.caption("수급이 데이터없음으로 보일 때는 여기서 원인을 확인하세요. 해외주식은 KRX 대상이 아니며, Streamlit Cloud에서 KRX 접속이 실패할 수도 있습니다.")
+    diag_cols = ["종목", "티커", "수급판정", "수급데이터상태", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%"]
+    st.dataframe(
+        result[diag_cols].style.format({
+            "기관5일": format_money,
+            "외국인5일": format_money,
+            "연기금20일": format_money,
+            "공매도비중%": lambda x: format_percent(x, 2),
+            "공매도잔고비중%": lambda x: format_percent(x, 2),
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 csv = result.to_csv(index=False).encode("utf-8-sig")
 st.download_button("결과 CSV 다운로드", data=csv, file_name="investment_dashboard_signals.csv", mime="text/csv")
@@ -564,6 +584,7 @@ else:
 
 **수급/공매도 확인**  
 종합수급점수 {selected['종합수급점수']:.1f} · 실제수급점수 {selected['실제수급점수']:.1f} · 수급판정 {selected['수급판정']} · 공매도판정 {selected['공매도판정']}  
+수급데이터상태: {selected.get('수급데이터상태', '-')} · 공매도데이터상태: {selected.get('공매도데이터상태', '-')}  
 기관5일 {format_money(selected['기관5일'])} · 외국인5일 {format_money(selected['외국인5일'])} · 연기금20일 {format_money(selected['연기금20일'])} · 공매도비중 {selected['공매도비중%'] if pd.notna(selected['공매도비중%']) else '-'}% · 잔고비중 {selected['공매도잔고비중%'] if pd.notna(selected['공매도잔고비중%']) else '-'}%
 
 **피보나치 구간**  

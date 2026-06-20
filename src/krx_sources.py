@@ -9,7 +9,17 @@ import pandas as pd
 
 
 def _today_yyyymmdd() -> str:
-    return datetime.now().strftime("%Y%m%d")
+    """Return a KRX-friendly end date.
+
+KRX/pykrx sometimes returns empty data or fails when the end date is
+Saturday/Sunday before the next trading session. Use the latest weekday
+as a safer default. This does not handle all Korean holidays, but avoids
+the most common weekend failure.
+"""
+    d = datetime.now()
+    while d.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        d = d - timedelta(days=1)
+    return d.strftime("%Y%m%d")
 
 
 def _past_yyyymmdd(days: int = 60) -> str:
