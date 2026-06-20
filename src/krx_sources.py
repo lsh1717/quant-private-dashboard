@@ -142,6 +142,126 @@ def _call_trading_value_by_date(stock_module: Any, start: str, end: str, ticker:
     return pd.DataFrame()
 
 
+
+
+
+def _call_trading_value_by_investor(stock_module: Any, start: str, end: str, ticker: str, detail: bool = True) -> pd.DataFrame:
+    """Fallback investor-flow call.
+
+    get_market_trading_value_by_date can return an empty frame in some
+    Streamlit/KRX combinations. The investor summary endpoint is often more
+    stable because it returns one row per investor group for the whole period.
+    """
+    fn = getattr(stock_module, "get_market_trading_value_by_investor", None)
+    if not callable(fn):
+        return pd.DataFrame()
+    attempts: list[dict[str, Any]] = []
+    if detail:
+        attempts.append({"detail": True})
+    attempts.append({})
+    last_error: Exception | None = None
+    for kwargs in attempts:
+        try:
+            df = fn(start, end, ticker, **kwargs)
+            if df is not None and not df.empty:
+                return df
+        except TypeError as exc:
+            last_error = exc
+            try:
+                df = fn(start, end, ticker)
+                if df is not None and not df.empty:
+                    return df
+            except Exception as exc2:  # noqa: BLE001
+                last_error = exc2
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+    if last_error:
+        raise last_error
+    return pd.DataFrame()
+
+
+def _find_row(df: pd.DataFrame, candidates: list[str]) -> Any | None:
+    """Find an index label containing an investor-name candidate."""
+    labels = [str(i) for i in df.index]
+    for cand in candidates:
+        for original, label in zip(df.index, labels):
+            if cand == label or cand in label:
+                return original
+    return None
+
+
+def _net_value_from_investor_frame(df: pd.DataFrame, investor_candidates: list[str]) -> float:
+    """Extract net-buy value from get_market_trading_value_by_investor output."""
+    if df is None or df.empty:
+        return np.nan
+    row_key = _find_row(df, investor_candidates)
+    if row_key is None:
+        return np.nan
+    net_col = _find_col(df, ["순매수", "순매수거래대금", "순매수대금", "순매수금액"])
+    if net_col is None:
+        # Some versions expose 매수 and 매도 only. Build net-buy manually.
+        buy_col = _find_col(df, ["매수", "매수거래대금", "매수대금", "매수금액"])
+        sell_col = _find_col(df, ["매도", "매도거래대금", "매도대금", "매도금액"])
+        if buy_col and sell_col:
+            try:
+                return float(pd.to_numeric(df.loc[row_key, buy_col], errors="coerce") - pd.to_numeric(df.loc[row_key, sell_col], errors="coerce"))
+            except Exception:
+                return np.nan
+        return np.nan
+    try:
+        return float(pd.to_numeric(df.loc[row_key, net_col], errors="coerce"))
+    except Exception:
+        return np.nan
+
+
+def _fetch_investor_summary_fallback(stock_module: Any, end: str, ticker: str) -> dict[str, Any] | None:
+    """Fallback using get_market_trading_value_by_investor for 5D/20D windows."""
+    try:
+        end_dt = datetime.strptime(end, "%Y%m%d")
+    except Exception:
+        end_dt = datetime.now()
+    # Calendar-day windows are wider than trading-day windows to cover holidays.
+    start_5_raw = (end_dt - timedelta(days=12)).strftime("%Y%m%d")
+    start_20_raw = (end_dt - timedelta(days=45)).strftime("%Y%m%d")
+    start_5 = _nearest_business_day(stock_module, start_5_raw)
+    start_20 = _nearest_business_day(stock_module, start_20_raw)
+    try:
+        df5 = _call_trading_value_by_investor(stock_module, start_5, end, ticker, detail=True)
+        df20 = _call_trading_value_by_investor(stock_module, start_20, end, ticker, detail=True)
+    except Exception:
+        return None
+    if (df5 is None or df5.empty) and (df20 is None or df20.empty):
+        return None
+
+    inst_candidates = ["기관합계", "기관"]
+    foreign_candidates = ["외국인합계", "외국인", "외국인 투자자"]
+    pension_candidates = ["연기금 등", "연기금", "연기금등"]
+    out: dict[str, Any] = {
+        "available": True,
+        "from": start_20,
+        "to": end,
+        "trading_days": 0,
+        "inst_5d": _net_value_from_investor_frame(df5, inst_candidates),
+        "inst_20d": _net_value_from_investor_frame(df20, inst_candidates),
+        "foreign_5d": _net_value_from_investor_frame(df5, foreign_candidates),
+        "foreign_20d": _net_value_from_investor_frame(df20, foreign_candidates),
+        "pension_5d": _net_value_from_investor_frame(df5, pension_candidates),
+        "pension_20d": _net_value_from_investor_frame(df20, pension_candidates),
+        "inst_pos_days_5d": 0,
+        "foreign_pos_days_5d": 0,
+        "pension_pos_days_20d": 0,
+        "raw_columns": f"fallback_by_investor_5d={list(map(str, df5.columns))}; 20d={list(map(str, df20.columns))}",
+        "source": "get_market_trading_value_by_investor",
+    }
+    # If every important value is NaN, treat it as unavailable.
+    important = [out["inst_5d"], out["inst_20d"], out["foreign_5d"], out["foreign_20d"], out["pension_20d"]]
+    if all(pd.isna(x) for x in important):
+        return None
+    out["flow_score"] = investor_flow_score(out)
+    out["flow_signal"] = investor_flow_signal(out)
+    return out
+
+
 def fetch_investor_flow(ticker: str, lookback_calendar_days: int = 90) -> dict[str, Any]:
     """Fetch KRX investor net trading value using pykrx.
 
@@ -166,7 +286,10 @@ def fetch_investor_flow(ticker: str, lookback_calendar_days: int = 90) -> dict[s
             df = _call_trading_value_by_date(stock, start2, end2, krx_ticker)
             start, end = start2, end2
         if df is None or df.empty:
-            return {"available": False, "reason": f"수급 데이터 없음({start}~{end})"}
+            fallback = _fetch_investor_summary_fallback(stock, end, krx_ticker)
+            if fallback is not None:
+                return fallback
+            return {"available": False, "reason": f"수급 데이터 없음({start}~{end}); by_investor fallback도 없음"}
 
         inst_col = _find_col(df, ["기관합계", "기관"])
         foreign_col = _find_col(df, ["외국인합계", "외국인"])
@@ -200,6 +323,13 @@ def fetch_investor_flow(ticker: str, lookback_calendar_days: int = 90) -> dict[s
             out["pension_5d"] = _safe_sum(df[pension_col], 5)
             out["pension_20d"] = _safe_sum(df[pension_col], 20)
             out["pension_pos_days_20d"] = _signed_days(df[pension_col], 20, positive=True)
+        # If by-date columns were not found or all are NaN, try the investor-summary endpoint.
+        important_vals = [out.get("inst_5d"), out.get("inst_20d"), out.get("foreign_5d"), out.get("foreign_20d"), out.get("pension_20d")]
+        if all(pd.isna(x) for x in important_vals):
+            fallback = _fetch_investor_summary_fallback(stock, end, krx_ticker)
+            if fallback is not None:
+                return fallback
+        out["source"] = "get_market_trading_value_by_date"
         out["flow_score"] = investor_flow_score(out)
         out["flow_signal"] = investor_flow_signal(out)
         return out
