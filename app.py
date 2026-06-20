@@ -106,6 +106,24 @@ def format_money(x: float) -> str:
         return "-"
 
 
+
+
+def format_float(x: float, digits: int = 1) -> str:
+    try:
+        if pd.isna(x):
+            return "-"
+        return f"{float(x):,.{digits}f}"
+    except Exception:
+        return "-"
+
+def format_percent(x: float, digits: int = 2) -> str:
+    try:
+        if pd.isna(x):
+            return "-"
+        return f"{float(x):,.{digits}f}"
+    except Exception:
+        return "-"
+
 def make_chart(df: pd.DataFrame, title: str):
     data = add_indicators(df)
     if data.empty:
@@ -275,7 +293,7 @@ if not urgent.empty:
     st.subheader("우선 확인 신호")
     st.dataframe(
         urgent[["알림우선순위", "행동신호", "종목", "현재가", "종합수급점수", "수급판정", "공매도판정", "손절가", "강제손절가", "알림이유", "경고"]]
-        .style.format({"현재가": "{:,.0f}", "손절가": "{:,.0f}", "강제손절가": "{:,.0f}"}),
+        .style.format({"현재가": format_price, "손절가": format_price, "강제손절가": format_price, "종합수급점수": lambda x: format_float(x, 1)}),
         use_container_width=True,
         hide_index=True,
     )
@@ -284,18 +302,24 @@ st.subheader("오늘의 후보")
 view_cols = ["행동신호", "알림우선순위", "상태", "종합점수", "종목", "티커", "섹터", "테마", "현재가", "손절가", "강제손절가", "RSI", "거래량배율", "20일수익률%", "구조점수", "종합수급점수", "실제수급점수", "수동수급기대", "수급판정", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도비중%", "공매도잔고비중%", "차트점수", "뉴스점수", "피보구간", "경고"]
 st.dataframe(
     result[view_cols].style.format({
-        "현재가": "{:,.0f}",
-        "손절가": "{:,.0f}",
-        "강제손절가": "{:,.0f}",
-        "종합점수": "{:.1f}",
-        "종합수급점수": "{:.1f}",
-        "실제수급점수": "{:.1f}",
-        "수동수급기대": "{:.1f}",
+        "현재가": format_price,
+        "손절가": format_price,
+        "강제손절가": format_price,
+        "종합점수": lambda x: format_float(x, 1),
+        "종합수급점수": lambda x: format_float(x, 1),
+        "실제수급점수": lambda x: format_float(x, 1),
+        "수동수급기대": lambda x: format_float(x, 1),
+        "RSI": lambda x: format_float(x, 1),
+        "거래량배율": lambda x: format_float(x, 2),
+        "20일수익률%": lambda x: format_float(x, 1),
+        "구조점수": lambda x: format_float(x, 1),
+        "차트점수": lambda x: format_float(x, 1),
+        "뉴스점수": lambda x: format_float(x, 1),
         "기관5일": format_money,
         "외국인5일": format_money,
         "연기금20일": format_money,
-        "공매도비중%": "{:.2f}",
-        "공매도잔고비중%": "{:.2f}",
+        "공매도비중%": lambda x: format_percent(x, 2),
+        "공매도잔고비중%": lambda x: format_percent(x, 2),
     }),
     use_container_width=True,
     hide_index=True,
