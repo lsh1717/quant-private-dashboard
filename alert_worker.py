@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from src.data_sources import fetch_price_history, load_keywords, load_watchlist, news_metrics, send_telegram_message
 from src.indicators import latest_snapshot
 from src.scoring import build_trade_plan, manual_structure_score, news_score, technical_score
+from src.krx_sources import build_flow_pack
 
 load_dotenv()
 BASE_DIR = Path(__file__).parent
@@ -34,14 +35,20 @@ def main() -> None:
         except Exception:
             article_count, keyword_hits = 0, 0
         ns = news_score(article_count, keyword_hits)
-        plan = build_trade_plan(row, snap, structure, tech, ns)
+        try:
+            flow_pack = build_flow_pack(ticker, enable=os.getenv("USE_KRX_FLOW", "1") != "0")
+        except Exception:
+            flow_pack = None
+        plan = build_trade_plan(row, snap, structure, tech, ns, flow_pack=flow_pack)
 
-        if plan.status in ["진입가능", "손절위험"]:
+        if plan.alert_priority in ["긴급", "높음"] or plan.action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보", "전량매도/손절 우선", "손절/비중축소"]:
             close = snap.get("close")
             close_text = f"{close:,.0f}" if close else "가격 확인 불가"
             alerts.append(
-                f"[{plan.status}] {row['name']}({ticker})\n"
+                f"[{plan.alert_priority}] {plan.action} · {row['name']}({ticker})\n"
                 f"점수: {plan.score:.1f} / 현재가: {close_text}\n"
+                f"이유: {plan.alert_reason}\n"
+                f"수급: {plan.supply_signal} / 공매도: {plan.short_signal} / 종합수급점수 {plan.supply_score:.1f}\n"
                 f"진입: {plan.entry_trigger}\n"
                 f"손절: {plan.stop_loss}\n"
                 f"경고: {plan.warning}"

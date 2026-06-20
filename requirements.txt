@@ -8,3 +8,4 @@ PyYAML==6.0.2
 requests==2.32.4
 plotly==6.2.0
 python-dotenv==1.1.1
+pykrx==1.0.51
