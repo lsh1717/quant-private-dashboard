@@ -1,29 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
 import pandas as pd
-
-
-def _today_yyyymmdd() -> str:
-    """Return a KRX-friendly end date.
-
-KRX/pykrx sometimes returns empty data or fails when the end date is
-Saturday/Sunday before the next trading session. Use the latest weekday
-as a safer default. This does not handle all Korean holidays, but avoids
-the most common weekend failure.
-"""
-    d = datetime.now()
-    while d.weekday() >= 5:  # 5=Saturday, 6=Sunday
-        d = d - timedelta(days=1)
-    return d.strftime("%Y%m%d")
-
-
-def _past_yyyymmdd(days: int = 60) -> str:
-    return (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
 
 
 def normalize_kr_ticker(ticker: str) -> str | None:
@@ -44,6 +25,53 @@ def normalize_kr_ticker(ticker: str) -> str | None:
     if len(t) == 6 and t.isdigit():
         return t
     return None
+
+
+def _fallback_weekday_yyyymmdd(d: datetime | None = None) -> str:
+    d = d or datetime.now()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.strftime("%Y%m%d")
+
+
+def _past_yyyymmdd(days: int = 90) -> str:
+    return (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+
+
+def _nearest_business_day(stock_module: Any, date_yyyymmdd: str) -> str:
+    """Use pykrx business-day helper when it exists, otherwise fallback to weekday.
+
+    KRX data often fails on weekends/holidays or when a non-trading day is used.
+    pykrx has changed helper behavior across versions, so this wrapper degrades
+    safely instead of breaking the dashboard.
+    """
+    try:
+        fn = getattr(stock_module, "get_nearest_business_day_in_a_week", None)
+        if callable(fn):
+            result = fn(date_yyyymmdd)
+            if result:
+                return str(result).replace("-", "")
+    except Exception:
+        pass
+    try:
+        return _fallback_weekday_yyyymmdd(datetime.strptime(date_yyyymmdd, "%Y%m%d"))
+    except Exception:
+        return _fallback_weekday_yyyymmdd()
+
+
+def _date_range(stock_module: Any, lookback_calendar_days: int = 90) -> tuple[str, str]:
+    today = datetime.now().strftime("%Y%m%d")
+    end = _nearest_business_day(stock_module, today)
+    try:
+        end_dt = datetime.strptime(end, "%Y%m%d")
+    except Exception:
+        end_dt = datetime.now()
+    start_raw = (end_dt - timedelta(days=lookback_calendar_days)).strftime("%Y%m%d")
+    start = _nearest_business_day(stock_module, start_raw)
+    # If the start helper returns a date after end for any odd reason, use raw.
+    if start > end:
+        start = start_raw
+    return start, end
 
 
 def _safe_sum(series: pd.Series, n: int) -> float:
@@ -81,12 +109,44 @@ def _signed_days(series: pd.Series, n: int, positive: bool = True) -> int:
         return 0
 
 
-def fetch_investor_flow(ticker: str, lookback_calendar_days: int = 45) -> dict[str, Any]:
+def _call_trading_value_by_date(stock_module: Any, start: str, end: str, ticker: str) -> pd.DataFrame:
+    """Try pykrx investor-flow calls with several signatures.
+
+    pykrx/KRX occasionally changes accepted parameters or returns empty data for
+    detail=True. Try detail=True first for pension data, then fallback to the
+    simpler investor groups.
+    """
+    attempts: list[tuple[str, dict[str, Any]]] = [
+        ("detail=True", {"detail": True}),
+        ("detail=False", {}),
+    ]
+    last_error: Exception | None = None
+    for _, kwargs in attempts:
+        try:
+            df = stock_module.get_market_trading_value_by_date(start, end, ticker, **kwargs)
+            if df is not None and not df.empty:
+                return df
+        except TypeError as exc:
+            last_error = exc
+            # Old pykrx may not support detail. Retry without kwargs.
+            try:
+                df = stock_module.get_market_trading_value_by_date(start, end, ticker)
+                if df is not None and not df.empty:
+                    return df
+            except Exception as exc2:  # noqa: BLE001
+                last_error = exc2
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+    if last_error:
+        raise last_error
+    return pd.DataFrame()
+
+
+def fetch_investor_flow(ticker: str, lookback_calendar_days: int = 90) -> dict[str, Any]:
     """Fetch KRX investor net trading value using pykrx.
 
-    The values are usually in KRW trading value and can be positive/negative.
-    This function intentionally degrades gracefully. If pykrx/KRX blocks the
-    request or the ticker is not Korean, it returns available=False.
+    Values are usually KRW net trading value. The function degrades gracefully
+    because KRX/pykrx may be delayed, blocked, or unavailable on Streamlit Cloud.
     """
     krx_ticker = normalize_kr_ticker(ticker)
     if not krx_ticker:
@@ -94,19 +154,19 @@ def fetch_investor_flow(ticker: str, lookback_calendar_days: int = 45) -> dict[s
 
     try:
         from pykrx import stock  # type: ignore
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"available": False, "reason": f"pykrx 미설치: {exc}"}
 
-    start = _past_yyyymmdd(lookback_calendar_days)
-    end = _today_yyyymmdd()
+    start, end = _date_range(stock, lookback_calendar_days)
     try:
-        # detail=True gives 금융투자/투신/연기금 등 세부 컬럼 when supported.
-        try:
-            df = stock.get_market_trading_value_by_date(start, end, krx_ticker, detail=True)
-        except TypeError:
-            df = stock.get_market_trading_value_by_date(start, end, krx_ticker)
+        df = _call_trading_value_by_date(stock, start, end, krx_ticker)
         if df is None or df.empty:
-            return {"available": False, "reason": "수급 데이터 없음"}
+            # One more fallback with a wider range. This helps after long market holidays.
+            start2, end2 = _date_range(stock, 180)
+            df = _call_trading_value_by_date(stock, start2, end2, krx_ticker)
+            start, end = start2, end2
+        if df is None or df.empty:
+            return {"available": False, "reason": f"수급 데이터 없음({start}~{end})"}
 
         inst_col = _find_col(df, ["기관합계", "기관"])
         foreign_col = _find_col(df, ["외국인합계", "외국인"])
@@ -143,22 +203,19 @@ def fetch_investor_flow(ticker: str, lookback_calendar_days: int = 45) -> dict[s
         out["flow_score"] = investor_flow_score(out)
         out["flow_signal"] = investor_flow_signal(out)
         return out
-    except Exception as exc:
-        return {"available": False, "reason": f"KRX 수급 조회 실패: {exc}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": f"KRX 수급 조회 실패({start}~{end}): {exc}"}
 
 
 def investor_flow_score(flow: dict[str, Any]) -> float:
     if not flow or not flow.get("available"):
         return 50.0
     score = 50.0
-
     inst_5d = flow.get("inst_5d", np.nan)
     inst_20d = flow.get("inst_20d", np.nan)
     foreign_5d = flow.get("foreign_5d", np.nan)
     foreign_20d = flow.get("foreign_20d", np.nan)
     pension_20d = flow.get("pension_20d", np.nan)
-
-    # Direction is more robust than absolute value because values differ by market cap.
     if pd.notna(inst_5d):
         score += 10 if inst_5d > 0 else -10
     if pd.notna(inst_20d):
@@ -169,7 +226,6 @@ def investor_flow_score(flow: dict[str, Any]) -> float:
         score += 8 if foreign_20d > 0 else -8
     if pd.notna(pension_20d):
         score += 8 if pension_20d > 0 else -6
-
     score += min(max(int(flow.get("inst_pos_days_5d", 0)) - 2, -2), 3) * 2
     score += min(max(int(flow.get("foreign_pos_days_5d", 0)) - 2, -2), 3) * 2
     return float(max(0, min(100, score)))
@@ -197,18 +253,43 @@ def investor_flow_signal(flow: dict[str, Any]) -> str:
     return "중립"
 
 
-def fetch_short_metrics(ticker: str, lookback_calendar_days: int = 45) -> dict[str, Any]:
+def _try_short_frame(stock_module: Any, start: str, end: str, ticker: str) -> tuple[pd.DataFrame, str]:
+    """Try several pykrx short-selling functions.
+
+    Some pykrx versions throw KeyError('거래량') in get_shorting_volume_by_date
+    because the KRX response columns changed. In that case use value/status
+    based functions and read any ratio-like column.
+    """
+    candidates = [
+        "get_shorting_volume_by_date",
+        "get_shorting_value_by_date",
+        "get_shorting_status_by_date",
+    ]
+    errors: list[str] = []
+    for name in candidates:
+        fn = getattr(stock_module, name, None)
+        if not callable(fn):
+            continue
+        try:
+            df = fn(start, end, ticker)
+            if df is not None and not df.empty:
+                return df, name
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {exc}")
+    raise RuntimeError("; ".join(errors) if errors else "공매도 함수 없음")
+
+
+def fetch_short_metrics(ticker: str, lookback_calendar_days: int = 90) -> dict[str, Any]:
     """Fetch short-selling metrics using pykrx when available."""
     krx_ticker = normalize_kr_ticker(ticker)
     if not krx_ticker:
         return {"available": False, "reason": "KRX 종목 아님"}
     try:
         from pykrx import stock  # type: ignore
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"available": False, "reason": f"pykrx 미설치: {exc}"}
 
-    start = _past_yyyymmdd(lookback_calendar_days)
-    end = _today_yyyymmdd()
+    start, end = _date_range(stock, lookback_calendar_days)
     out: dict[str, Any] = {
         "available": False,
         "short_ratio_latest": np.nan,
@@ -220,34 +301,45 @@ def fetch_short_metrics(ticker: str, lookback_calendar_days: int = 45) -> dict[s
     errors: list[str] = []
 
     try:
-        vol_df = stock.get_shorting_volume_by_date(start, end, krx_ticker)
+        vol_df, source_name = _try_short_frame(stock, start, end, krx_ticker)
         if vol_df is not None and not vol_df.empty:
-            ratio_col = _find_col(vol_df, ["비중", "공매도비중"])
+            ratio_col = _find_col(vol_df, ["비중", "공매도비중", "공매도 비중", "공매도거래비중"])
             if ratio_col:
                 out["short_ratio_latest"] = _safe_last(vol_df[ratio_col])
                 out["available"] = True
-    except Exception as exc:
+                out["short_trade_source"] = source_name
+            else:
+                errors.append(f"공매도 거래 비중 컬럼 없음: {list(map(str, vol_df.columns))}")
+    except Exception as exc:  # noqa: BLE001
         errors.append(f"공매도 거래 조회 실패: {exc}")
 
     try:
-        bal_df = stock.get_shorting_balance_by_date(start, end, krx_ticker)
-        if bal_df is not None and not bal_df.empty:
-            ratio_col = _find_col(bal_df, ["비중", "잔고비중"])
-            if ratio_col:
-                s = pd.to_numeric(bal_df[ratio_col].dropna(), errors="coerce")
-                if not s.empty:
-                    out["short_balance_ratio_latest"] = float(s.iloc[-1])
-                    if len(s) >= 6:
-                        out["short_balance_ratio_change_5d"] = float(s.iloc[-1] - s.iloc[-6])
-                    out["available"] = True
-    except Exception as exc:
+        fn = getattr(stock, "get_shorting_balance_by_date", None)
+        if callable(fn):
+            bal_df = fn(start, end, krx_ticker)
+            if bal_df is not None and not bal_df.empty:
+                ratio_col = _find_col(bal_df, ["비중", "잔고비중", "공매도잔고비중", "상장주식수대비"])
+                if ratio_col:
+                    s = pd.to_numeric(bal_df[ratio_col].dropna(), errors="coerce")
+                    if not s.empty:
+                        out["short_balance_ratio_latest"] = float(s.iloc[-1])
+                        if len(s) >= 6:
+                            out["short_balance_ratio_change_5d"] = float(s.iloc[-1] - s.iloc[-6])
+                        out["available"] = True
+                else:
+                    errors.append(f"공매도 잔고 비중 컬럼 없음: {list(map(str, bal_df.columns))}")
+        else:
+            errors.append("get_shorting_balance_by_date 없음")
+    except Exception as exc:  # noqa: BLE001
         errors.append(f"공매도 잔고 조회 실패: {exc}")
 
     if out["available"]:
+        out["from"] = start
+        out["to"] = end
         out["short_score"] = short_score(out)
         out["short_signal"] = short_signal(out)
     else:
-        out["reason"] = " / ".join(errors) if errors else "공매도 데이터 없음"
+        out["reason"] = " / ".join(errors) if errors else f"공매도 데이터 없음({start}~{end})"
     return out
 
 
@@ -258,7 +350,6 @@ def short_score(short: dict[str, Any]) -> float:
     ratio = short.get("short_ratio_latest", np.nan)
     bal = short.get("short_balance_ratio_latest", np.nan)
     chg = short.get("short_balance_ratio_change_5d", np.nan)
-
     if pd.notna(ratio):
         if ratio >= 20:
             score -= 18
