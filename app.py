@@ -124,6 +124,199 @@ def format_percent(x: float, digits: int = 2) -> str:
     except Exception:
         return "-"
 
+
+
+def safe_float_value(x, default=None):
+    try:
+        if pd.isna(x):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def pass_label(ok: bool | None) -> str:
+    if ok is None:
+        return "⚪ 확인불가"
+    return "🟢 충족" if ok else "🔴 미충족"
+
+
+def condition_row(name: str, ok: bool | None, current: str, criteria: str, use: str, note: str) -> dict:
+    return {
+        "조건": name,
+        "판정": pass_label(ok),
+        "현재값": current,
+        "기준": criteria,
+        "용도": use,
+        "해석": note,
+    }
+
+
+def build_condition_checklist(selected: pd.Series) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Build a plain-language checklist for the selected stock.
+
+    The goal is to show exactly where each buy/sell condition is checked,
+    so the user does not have to infer it from a long sentence.
+    """
+    close = safe_float_value(selected.get("현재가"))
+    ma20 = safe_float_value(selected.get("20일선"))
+    ma60 = safe_float_value(selected.get("60일선"))
+    high20 = safe_float_value(selected.get("20일고점"))
+    low20 = safe_float_value(selected.get("20일저점"))
+    rsi = safe_float_value(selected.get("RSI"))
+    volume_ratio = safe_float_value(selected.get("거래량배율"))
+    structure = safe_float_value(selected.get("구조점수"))
+    supply = safe_float_value(selected.get("종합수급점수"))
+    short_score = safe_float_value(selected.get("공매도점수"))
+    fib382 = safe_float_value(selected.get("피보38.2"))
+    fib50 = safe_float_value(selected.get("피보50"))
+    fib618 = safe_float_value(selected.get("피보61.8"))
+    stop_price = safe_float_value(selected.get("손절가"))
+    hard_stop = safe_float_value(selected.get("강제손절가"))
+    fib_zone_text = str(selected.get("피보구간", "아니오"))
+    supply_signal = str(selected.get("수급판정", "데이터없음"))
+    short_signal = str(selected.get("공매도판정", "데이터없음"))
+
+    rows = []
+    rows.append(condition_row(
+        "구조점수",
+        None if structure is None else structure >= 75,
+        "-" if structure is None else f"{structure:.1f}",
+        "75점 이상",
+        "공통 매수 필터",
+        "네 기준의 내러티브·정책·병목·수급기대·미반영 점수",
+    ))
+    rows.append(condition_row(
+        "20일선 위",
+        None if close is None or ma20 is None else close > ma20,
+        f"현재가 {format_price(close)} / 20일선 {format_price(ma20)}",
+        "현재가 > 20일선",
+        "추세 유지",
+        "20일선 위면 단기 추세가 완전히 깨진 상태는 아님",
+    ))
+    rows.append(condition_row(
+        "60일선 위",
+        None if close is None or ma60 is None else close > ma60,
+        f"현재가 {format_price(close)} / 60일선 {format_price(ma60)}",
+        "현재가 > 60일선",
+        "중기 추세",
+        "눌림 매수는 최소한 60일선 위를 더 좋게 봄",
+    ))
+    rows.append(condition_row(
+        "20일 고점 돌파",
+        None if close is None or high20 is None else close >= high20,
+        f"현재가 {format_price(close)} / 20일고점 {format_price(high20)}",
+        "현재가 또는 종가 ≥ 20일고점",
+        "돌파 매수",
+        "장중 돌파보다 종가 유지가 더 안전함",
+    ))
+    rows.append(condition_row(
+        "거래량 증가",
+        None if volume_ratio is None else volume_ratio >= 1.3,
+        "-" if volume_ratio is None else f"{volume_ratio:.2f}배",
+        "20일 평균 거래량의 1.3배 이상",
+        "돌파 신뢰도",
+        "거래량이 붙어야 가짜 돌파 가능성이 줄어듦",
+    ))
+    rows.append(condition_row(
+        "RSI 돌파 적정",
+        None if rsi is None else 45 <= rsi <= 70,
+        "-" if rsi is None else f"{rsi:.1f}",
+        "45~70",
+        "돌파 매수",
+        "너무 낮으면 힘 부족, 70 초과는 추격 위험",
+    ))
+    rows.append(condition_row(
+        "피보나치 눌림 구간",
+        None if fib382 is None or fib618 is None else fib_zone_text == "예",
+        f"현재가 {format_price(close)} / 38.2% {format_price(fib382)} / 50% {format_price(fib50)} / 61.8% {format_price(fib618)}",
+        "38.2~61.8% 부근 지지",
+        "눌림 매수",
+        "이 구간에서 버티고 다시 올라가야 눌림 매수 후보",
+    ))
+    rows.append(condition_row(
+        "RSI 눌림 적정",
+        None if rsi is None else 38 <= rsi <= 58,
+        "-" if rsi is None else f"{rsi:.1f}",
+        "38~58",
+        "눌림 매수",
+        "과열이 식었지만 완전히 무너진 과매도는 아닌 구간",
+    ))
+    rows.append(condition_row(
+        "수급 개선",
+        None if supply is None else supply >= 68,
+        f"종합수급점수 {'-' if supply is None else f'{supply:.1f}'} / {supply_signal}",
+        "68점 이상 또는 기관·외국인 우호",
+        "매수 신뢰도",
+        "기관/외국인/연기금/수동수급기대/공매도 점수를 합친 값",
+    ))
+    rows.append(condition_row(
+        "공매도 부담 낮음",
+        None if short_score is None else short_score >= 50 and "부담 큼" not in short_signal,
+        f"공매도점수 {'-' if short_score is None else f'{short_score:.1f}'} / {short_signal}",
+        "50점 이상, 부담 큼 아님",
+        "리스크 필터",
+        "공매도 잔고·비중이 부담이면 신규매수 신뢰도 하락",
+    ))
+    rows.append(condition_row(
+        "1차 손절선 위",
+        None if close is None or stop_price is None else close > stop_price,
+        f"현재가 {format_price(close)} / 손절가 {format_price(stop_price)}",
+        "현재가 > 손절가",
+        "리스크 관리",
+        "손절선 아래면 신규매수보다 방어 우선",
+    ))
+    rows.append(condition_row(
+        "20일 저점 이탈 아님",
+        None if close is None or low20 is None else close > low20,
+        f"현재가 {format_price(close)} / 20일저점 {format_price(low20)}",
+        "현재가 > 20일저점",
+        "전량매도 방어",
+        "20일 저점 이탈은 진입 근거 훼손 신호",
+    ))
+    rows.append(condition_row(
+        "강제손절선 위",
+        None if close is None or hard_stop is None else close > hard_stop,
+        f"현재가 {format_price(close)} / 강제손절가 {format_price(hard_stop)}",
+        "현재가 > 강제손절가",
+        "최종 방어선",
+        "강제손절선 아래면 반등 기대보다 원금 방어 우선",
+    ))
+
+    df = pd.DataFrame(rows)
+
+    breakout_checks = [
+        structure is not None and structure >= 75,
+        close is not None and ma20 is not None and close > ma20,
+        close is not None and ma60 is not None and close > ma60,
+        close is not None and high20 is not None and close >= high20,
+        volume_ratio is not None and volume_ratio >= 1.3,
+        rsi is not None and 45 <= rsi <= 70,
+        supply is not None and supply >= 68,
+        short_score is not None and short_score >= 50 and "부담 큼" not in short_signal,
+    ]
+    pullback_checks = [
+        structure is not None and structure >= 75,
+        close is not None and ma60 is not None and close > ma60,
+        fib_zone_text == "예",
+        rsi is not None and 38 <= rsi <= 58,
+        supply is not None and supply >= 64,
+        short_score is not None and short_score >= 50 and "부담 큼" not in short_signal,
+    ]
+    risk_checks = [
+        close is not None and ma20 is not None and ma60 is not None and not (close < ma20 and close < ma60),
+        close is not None and low20 is not None and close > low20,
+        close is not None and hard_stop is not None and close > hard_stop,
+    ]
+
+    summary = {
+        "돌파매수": f"{sum(bool(x) for x in breakout_checks)} / {len(breakout_checks)}개 충족",
+        "눌림매수": f"{sum(bool(x) for x in pullback_checks)} / {len(pullback_checks)}개 충족",
+        "방어조건": f"{sum(bool(x) for x in risk_checks)} / {len(risk_checks)}개 안전",
+    }
+    return df, summary
+
+
 def make_chart(df: pd.DataFrame, title: str):
     data = add_indicators(df)
     if data.empty:
@@ -156,6 +349,7 @@ with st.expander("이 대시보드가 판단하는 행동 기준", expanded=Fals
 - **분할매도 우선**: 극단 과열, 거래량 폭증, 전고점 돌파 실패 가능성이 큰 상태.
 - **손절/비중축소**: 20일선과 60일선을 동시에 이탈해 진입 근거가 약해진 상태.
 - **전량매도/손절 우선**: 20일 최저가 또는 피보나치 61.8%/핵심 지지선 붕괴. 알림이 늦을 수 있으므로 가격 조건을 미리 정해두고 대응.
+- **조건 체크리스트**: 종목별 매매 계획에서 20일선, 20일 고점, 거래량, RSI, 피보나치, 수급, 공매도, 손절선을 각각 충족/미충족으로 확인.
         """
     )
 
@@ -229,6 +423,10 @@ for i, row in watchlist.iterrows():
             "현재가": snap.get("close"),
             "20일선": snap.get("ma20"),
             "60일선": snap.get("ma60"),
+            "20일고점": snap.get("high20"),
+            "20일저점": snap.get("low20"),
+            "60일고점": snap.get("high60"),
+            "60일저점": snap.get("low60"),
             "RSI": round(snap.get("rsi14", 0), 1) if snap else None,
             "거래량배율": round(snap.get("volume_ratio", 0), 2) if snap else None,
             "20일수익률%": round(snap.get("ret_20d", 0), 1) if snap else None,
@@ -341,6 +539,16 @@ else:
     b.metric("종합점수", f"{selected['종합점수']:.1f}")
     c.metric("현재가", format_price(selected["현재가"]))
     d.metric("손절가", format_price(selected["손절가"]))
+
+    checklist, checklist_summary = build_condition_checklist(selected)
+    s1, s2, s3 = st.columns(3)
+    s1.metric("돌파매수 체크", checklist_summary["돌파매수"])
+    s2.metric("눌림매수 체크", checklist_summary["눌림매수"])
+    s3.metric("방어조건 체크", checklist_summary["방어조건"])
+
+    st.markdown("#### 조건 체크리스트")
+    st.dataframe(checklist, use_container_width=True, hide_index=True)
+    st.caption("초록색이 많아질수록 조건이 가까워진 것이고, 빨간색이 핵심 조건이면 아직 매수 신호가 아닙니다. 실제 주문 전에는 증권사 원자료 가격·거래량·수급을 다시 확인하세요.")
 
     st.markdown(f"""
 ### {selected['종목']} · {selected['섹터']} · {selected['테마']}
