@@ -19,7 +19,7 @@ from src.backtester import run_backtest
 load_dotenv()
 BASE_DIR = Path(__file__).parent
 
-st.set_page_config(page_title="개인 투자 대시보드", page_icon="📈", layout="wide")
+st.set_page_config(page_title="개인 투자 대시보드 v8 Free", page_icon="📈", layout="wide")
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -35,7 +35,7 @@ def password_gate() -> None:
         return
     if st.session_state.get("authenticated"):
         return
-    st.title("개인 투자 대시보드")
+    st.title("개인 투자 대시보드 v8 Free")
     pw = st.text_input("비밀번호", type="password")
     if st.button("입장"):
         if pw == expected:
@@ -241,6 +241,24 @@ def manual_supply_pack(ticker: str, manual_map: dict[str, dict]) -> dict | None:
         "short_score": short_s,
         "composite_supply_score": composite,
     }
+
+
+
+def load_auto_supply_cache() -> dict[str, dict]:
+    """Load investor/short data created by GitHub Actions collector.
+
+    File path: data/flow_auto.csv
+    This is the free automation path: GitHub Actions updates the CSV,
+    and Streamlit reads it automatically. Manual upload can still override it.
+    """
+    cache_path = BASE_DIR / "data" / "flow_auto.csv"
+    if not cache_path.exists():
+        return {}
+    try:
+        with cache_path.open("rb") as f:
+            return load_manual_supply_csv(f)
+    except Exception:
+        return {}
 
 def format_price(x: float) -> str:
     try:
@@ -915,7 +933,7 @@ def build_final_decision(row: dict, holding: bool) -> tuple[str, str, str]:
     return decision, task, prep
 
 
-st.title("개인 투자 대시보드")
+st.title("개인 투자 대시보드 v8 Free")
 st.caption("네 기준: 내러티브 → 정책/CAPEX → 병목/공급제한 → 지속 매수 주체 → 아직 덜 반영된 구간 → 차트 확인")
 
 with st.expander("이 대시보드가 판단하는 행동 기준", expanded=False):
@@ -975,9 +993,19 @@ manual_supply_upload = st.sidebar.file_uploader(
     type=["csv"],
     help="자동 KRX 조회가 안 될 때 사용합니다. ticker, 기관5일, 외국인5일, 연기금20일, 공매도비중%, 공매도잔고비중% 컬럼을 넣으면 됩니다.",
 )
+auto_supply_map = load_auto_supply_cache()
+if auto_supply_map:
+    st.sidebar.success(f"자동 수급 캐시 {len(auto_supply_map)}개 티커 인식")
+else:
+    st.sidebar.info("자동 수급 캐시 없음: GitHub Actions가 실행되면 data/flow_auto.csv가 생성됩니다.")
+
 manual_supply_map = load_manual_supply_csv(manual_supply_upload)
 if manual_supply_map:
     st.sidebar.success(f"수동 수급 CSV {len(manual_supply_map)}개 티커 인식")
+
+# 우선순위: GitHub Actions 자동 캐시 → 사용자가 업로드한 수동 CSV override
+supply_map = dict(auto_supply_map)
+supply_map.update(manual_supply_map)
 
 portfolio_upload = st.sidebar.file_uploader(
     "보유종목/평단 CSV 업로드",
@@ -1019,9 +1047,9 @@ for i, row in watchlist.iterrows():
     news_data[ticker] = articles
     ns = news_score(article_count, keyword_hits)
     flow_pack = cached_flow_pack(ticker, use_krx_flow)
-    manual_pack = manual_supply_pack(ticker, manual_supply_map)
+    manual_pack = manual_supply_pack(ticker, supply_map)
     if manual_pack is not None:
-        # 수동 CSV가 있으면 자동 KRX 조회 결과보다 우선합니다.
+        # GitHub Actions 자동 캐시 또는 수동 CSV가 있으면 실시간 KRX 조회 결과보다 우선합니다.
         flow_pack = manual_pack
     plan = build_trade_plan(row, snap, structure, tech, ns, flow_pack=flow_pack)
     strategy_type = infer_strategy_type(row)
@@ -1345,7 +1373,7 @@ else:
 
 
 st.subheader("백테스트")
-st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. v7은 오늘 할 일 요약·보유/미보유 구분·Buy & Hold 비교, 추세보유형, 분할매도+추세보유, 코어보유형 청산을 지원합니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
+st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. v8 무료 자동수급 버전은 GitHub Actions 수급 캐시·오늘 할 일 요약·보유/미보유 구분·Buy & Hold 비교, 추세보유형, 분할매도+추세보유, 코어보유형 청산을 지원합니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
 
 if result.empty:
     st.info("백테스트할 종목이 없습니다.")

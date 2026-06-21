@@ -1,49 +1,58 @@
-# 개인 투자 대시보드 v7
+# 개인 투자 대시보드 v8 Free
 
-실전 실행용 요약 화면을 추가한 버전입니다.
+무료 자동수급 구조를 추가한 버전입니다.
 
-## 핵심 기능
+## 핵심 구조
 
-- 오늘 할 일 요약
-  - 신규매수/추가 후보
-  - 보유관리
-  - 위험관리
-  - 대기/관찰
-- 보유/미보유 구분
-- 포트폴리오 CSV 업로드
-- 평단가·보유수량·목표비중 반영
-- 손절폭 자동 계산
-- 최종판정 / 오늘할일 / 주문준비 컬럼 추가
-- 종목별 전략타입 반영
-- 백테스트 유지
-- 수급 CSV 직접 업로드 유지
+이 버전은 Railway/Supabase 없이 무료로 시작합니다.
 
-## 포트폴리오 CSV 형식
-
-사이드바의 `보유종목/평단 CSV 업로드`에 아래 형식의 CSV를 올리면 됩니다.
-
-```csv
-ticker,보유여부,평단가,보유수량,목표비중,메모
-000660.KS,Y,210000,10,20,코어보유형 예시
-010120.KS,N,0,0,10,신규매수 후보 예시
+```text
+GitHub Actions
+→ 평일 장마감 후 collector/update_flow_cache.py 실행
+→ data/flow_auto.csv 자동 생성/갱신
+→ Streamlit 대시보드가 flow_auto.csv 자동 인식
 ```
 
-`보유여부`는 Y/N, 보유/미보유, TRUE/FALSE 등을 인식합니다.
+수급 데이터 우선순위는 다음과 같습니다.
 
-## 수급 CSV 형식
-
-자동 KRX 조회가 안 될 때 사이드바의 `수급/공매도 CSV 직접 업로드`에 올립니다.
-
-```csv
-ticker,기관5일,기관20일,외국인5일,외국인20일,연기금20일,공매도비중%,공매도잔고비중%,잔고증감5일%p
-000660.KS,45000000000,160000000000,-20000000000,70000000000,30000000000,5.8,1.7,0.2
+```text
+1순위: data/flow_auto.csv 자동 수급 캐시
+2순위: 사이드바에서 직접 업로드한 수급 CSV
+3순위: 앱 내부 KRX 직접 조회
+4순위: 데이터없음
 ```
 
-## 실행
+## 새로 추가된 파일
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
+```text
+collector/update_flow_cache.py
+.github/workflows/update-flow-cache.yml
+data/flow_auto.csv
 ```
 
-Streamlit Cloud에서는 Python 3.12 권장.
+## 적용 방법
+
+1. ZIP 압축을 풉니다.
+2. GitHub 저장소에 압축 푼 안쪽 파일 전체를 업로드합니다.
+3. Commit changes를 누릅니다.
+4. Streamlit 앱에서 Reboot app을 누릅니다.
+5. GitHub 저장소의 Actions 탭으로 이동합니다.
+6. `Update KRX Flow Cache` 워크플로를 선택합니다.
+7. `Run workflow`를 눌러 수동 실행 테스트를 합니다.
+8. 실행 성공 후 `data/flow_auto.csv`가 채워졌는지 확인합니다.
+
+## 자동 실행 시간
+
+기본값은 평일 한국시간 오후 7시 30분입니다.
+
+```yaml
+- cron: "30 10 * * 1-5"
+```
+
+GitHub Actions의 cron은 UTC 기준입니다. 한국시간 19:30은 UTC 10:30입니다.
+
+## 주의
+
+KRX/pykrx 응답 자체가 빈 값이면 GitHub Actions에서도 수집이 실패할 수 있습니다. 다만 이 방식은 Streamlit 앱 안에서 직접 조회하는 것보다 안정적이고, 실패해도 GitHub Actions 로그에서 원인을 확인할 수 있습니다.
+
+`data/flow_auto.csv`가 빈 상태이면 대시보드에서는 자동 수급 캐시 없음 또는 데이터없음으로 보입니다. 이때는 Actions 로그를 확인하거나 기존처럼 수급 CSV를 직접 업로드하면 됩니다.
