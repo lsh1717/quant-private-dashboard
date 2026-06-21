@@ -785,6 +785,136 @@ def strategy_stop_text(strategy_type: str) -> str:
     return "확정 신호 전까지 보수적으로 관찰."
 
 
+
+def _truthy_holding(value) -> bool:
+    """Interpret portfolio CSV holding flag."""
+    text = str(value).strip().upper()
+    return text in ["Y", "YES", "TRUE", "1", "보유", "보유중", "O", "○"]
+
+
+def load_portfolio_csv(uploaded_file) -> dict[str, dict]:
+    """Load optional portfolio CSV.
+
+    Supported columns:
+    ticker/티커/종목코드, 보유여부, 평단가, 보유수량, 목표비중.
+    If no file is uploaded, all stocks are treated as 미보유.
+    """
+    if uploaded_file is None:
+        return {}
+    try:
+        df = pd.read_csv(uploaded_file)
+    except UnicodeDecodeError:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, encoding="cp949")
+    except Exception as exc:
+        st.sidebar.error(f"포트폴리오 CSV 읽기 실패: {exc}")
+        return {}
+    ticker_col = _col(df, ["ticker", "티커", "종목코드", "code", "코드"])
+    if ticker_col is None:
+        st.sidebar.error("포트폴리오 CSV에 ticker/티커/종목코드 컬럼이 필요합니다.")
+        return {}
+    holding_col = _col(df, ["보유여부", "holding", "hold", "보유"])
+    avg_col = _col(df, ["평단가", "avg_price", "average_price", "평균단가"])
+    qty_col = _col(df, ["보유수량", "quantity", "qty", "수량"])
+    target_col = _col(df, ["목표비중", "target_weight", "target", "목표비중%"])
+    memo_col = _col(df, ["메모", "memo", "note", "notes"])
+    out: dict[str, dict] = {}
+    for _, r in df.iterrows():
+        raw = str(r.get(ticker_col, "")).strip().upper()
+        if not raw:
+            continue
+        holding = _truthy_holding(r.get(holding_col, "")) if holding_col is not None else False
+        avg = _to_number(r.get(avg_col)) if avg_col is not None else pd.NA
+        qty = _to_number(r.get(qty_col)) if qty_col is not None else pd.NA
+        target = _to_number(r.get(target_col)) if target_col is not None else pd.NA
+        memo = str(r.get(memo_col, "")).strip() if memo_col is not None else ""
+        item = {
+            "holding": holding,
+            "avg_price": avg,
+            "quantity": qty,
+            "target_weight": target,
+            "memo": memo,
+        }
+        for key in _ticker_keys(raw):
+            out[key] = item
+    return out
+
+
+def portfolio_info(ticker: str, portfolio_map: dict[str, dict]) -> dict:
+    for key in _ticker_keys(ticker):
+        if key in portfolio_map:
+            info = portfolio_map[key].copy()
+            return info
+    return {"holding": False, "avg_price": pd.NA, "quantity": pd.NA, "target_weight": pd.NA, "memo": ""}
+
+
+def calc_percent(current, base):
+    cur = safe_float_value(current)
+    b = safe_float_value(base)
+    if cur is None or b is None or b == 0:
+        return pd.NA
+    return (cur / b - 1.0) * 100.0
+
+
+def build_final_decision(row: dict, holding: bool) -> tuple[str, str, str]:
+    """Convert raw signals into an execution-oriented final decision."""
+    action = str(row.get("행동신호", ""))
+    status = str(row.get("상태", ""))
+    strategy_type = str(row.get("전략타입", ""))
+    practical = str(row.get("실전해석", ""))
+    stop = format_price(row.get("손절가"))
+    hard_stop = format_price(row.get("강제손절가"))
+    high20 = format_price(row.get("20일고점"))
+    vol = format_float(row.get("거래량배율"), 2)
+    stop_width = row.get("손절폭%", pd.NA)
+    stop_width_text = "-" if pd.isna(stop_width) else f"{float(stop_width):.1f}%"
+
+    if holding:
+        if action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보"]:
+            decision = "보유/추가매수 검토"
+            task = f"보유 유지. 추가매수는 손절폭 {stop_width_text}와 거래량 {vol}배 확인 후 작게 분할. 손절 알림 {stop}."
+        elif action in ["분할매도 우선", "신규매수 금지·분할매도 검토"]:
+            decision = "일부익절/보유관리" if strategy_type in ["코어보유형", "코어+스윙형"] else "분할매도 검토"
+            task = practical or f"보유자는 일부 익절 검토. 신규매수는 대기. 손절 알림 {stop}."
+        elif action == "손절/비중축소":
+            decision = "트레이딩축소/코어확인" if strategy_type in ["코어보유형", "코어+스윙형"] else "비중축소 검토"
+            task = practical or f"손절가 {stop} 회복 여부 확인. 회복 실패 시 비중축소."
+        elif action == "전량매도/손절 우선":
+            decision = "손절/전량정리 검토"
+            task = practical or f"강제손절가 {hard_stop}와 주요 저점 이탈 여부 확인. 방어 우선."
+        elif action == "진입대기":
+            decision = "보유 유지/추가대기"
+            task = f"보유자는 유지 관찰. 추가매수는 20일고점 {high20} 돌파+거래량 증가 또는 눌림 지지 확인 후."
+        else:
+            decision = "보유관리"
+            task = f"보유 유지 관찰. 손절 알림 {stop}, 강제손절 알림 {hard_stop}."
+    else:
+        if action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보"] and status == "진입가능":
+            decision = "신규매수 검토"
+            task = f"1차 소량 진입 후보. 손절폭 {stop_width_text}, 거래량 {vol}배 확인. 손절 알림 {stop}."
+        elif action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보"]:
+            decision = "조건부 매수대기"
+            task = f"매수 후보지만 종가/거래량 확인 필요. 20일고점 {high20} 돌파 또는 눌림 지지 확인."
+        elif action == "진입대기":
+            decision = "진입대기"
+            task = f"아직 매수 아님. 20일고점 {high20} 돌파+거래량 1.3배 이상 또는 피보나치 지지까지 대기."
+        elif action in ["분할매도 우선", "신규매수 금지·분할매도 검토"] or status == "추격금지":
+            decision = "추격금지"
+            task = "신규매수 금지. 과열 해소 또는 눌림 매수 후보 전환까지 대기."
+        elif action in ["손절/비중축소", "전량매도/손절 우선"] or status == "손절위험":
+            decision = "신규매수 제외"
+            task = "신규매수 제외. 20일선/60일선 회복과 방어조건 회복 전까지 관찰만."
+        elif action == "관심·반등 확인":
+            decision = "관찰"
+            task = "관심 종목. 반등 확인 전까지 신규매수는 보류."
+        else:
+            decision = "관찰"
+            task = "확정 매수 신호 없음. 조건 체크리스트에서 핵심 미충족 항목 확인."
+
+    prep = f"가격 알림: 손절 {stop}, 강제손절 {hard_stop}, 돌파 {high20}"
+    return decision, task, prep
+
+
 st.title("개인 투자 대시보드")
 st.caption("네 기준: 내러티브 → 정책/CAPEX → 병목/공급제한 → 지속 매수 주체 → 아직 덜 반영된 구간 → 차트 확인")
 
@@ -849,6 +979,15 @@ manual_supply_map = load_manual_supply_csv(manual_supply_upload)
 if manual_supply_map:
     st.sidebar.success(f"수동 수급 CSV {len(manual_supply_map)}개 티커 인식")
 
+portfolio_upload = st.sidebar.file_uploader(
+    "보유종목/평단 CSV 업로드",
+    type=["csv"],
+    help="ticker, 보유여부, 평단가, 보유수량, 목표비중 컬럼을 넣으면 보유자/미보유자 기준으로 오늘 할 일을 다르게 보여줍니다.",
+)
+portfolio_map = load_portfolio_csv(portfolio_upload)
+if portfolio_map:
+    st.sidebar.success(f"포트폴리오 CSV {len(portfolio_map)}개 티커 인식")
+
 sector_filter = st.sidebar.multiselect("섹터 필터", sorted(watchlist["sector"].unique().tolist()), default=[])
 strategy_filter = st.sidebar.multiselect("전략타입 필터", [x for x in STRATEGY_TYPES if x in set(watchlist["strategy_type"].astype(str))] or STRATEGY_TYPES, default=[])
 status_filter = st.sidebar.multiselect("상태 필터", ["진입가능", "진입대기", "관심", "관찰", "추격금지", "손절위험", "데이터없음"], default=[])
@@ -895,9 +1034,15 @@ for i, row in watchlist.iterrows():
 
     flow_reason = str(flow.get("reason") or flow.get("source") or "조회성공") if flow.get("available") else str(flow.get("reason", "데이터없음"))
     short_reason = str(short.get("reason") or short.get("source") or "조회성공") if short.get("available") else str(short.get("reason", "데이터없음"))
+    pinfo = portfolio_info(ticker, portfolio_map)
+    holding = bool(pinfo.get("holding", False))
+    avg_price = pinfo.get("avg_price", pd.NA)
+    quantity = pinfo.get("quantity", pd.NA)
+    target_weight = pinfo.get("target_weight", pd.NA)
+    pnl_pct = calc_percent(snap.get("close"), avg_price)
+    stop_width_pct = calc_percent(plan.stop_price, snap.get("close"))
 
-    rows.append(
-        {
+    row_payload = {
             "상태": plan.status,
             "종합점수": round(plan.score, 1),
             "종목": row["name"],
@@ -956,9 +1101,20 @@ for i, row in watchlist.iterrows():
             "손절기준": plan.stop_loss,
             "매도기준": plan.sell_rules,
             "경고": plan.warning,
+            "보유상태": "보유" if holding else "미보유",
+            "평단가": avg_price,
+            "보유수량": quantity,
+            "목표비중%": target_weight,
+            "평가손익%": pnl_pct,
+            "손절폭%": stop_width_pct,
+            "포트메모": pinfo.get("memo", ""),
             "메모": row.get("notes", ""),
         }
-    )
+    decision, today_task, order_prep = build_final_decision(row_payload, holding)
+    row_payload["최종판정"] = decision
+    row_payload["오늘할일"] = today_task
+    row_payload["주문준비"] = order_prep
+    rows.append(row_payload)
     progress.progress((i + 1) / len(watchlist), text=f"계산 중: {row['name']}")
 progress.empty()
 
@@ -973,6 +1129,52 @@ if action_filter:
     result = result[result["행동신호"].isin(action_filter)]
 
 status_order = ["진입가능", "진입대기", "관심", "관찰", "추격금지", "손절위험", "데이터없음"]
+
+st.subheader("오늘 할 일")
+summary_cols = ["최종판정", "오늘할일", "보유상태", "전략타입", "종목", "현재가", "손절가", "손절폭%", "RSI", "거래량배율", "주문준비"]
+
+def _show_task_table(title: str, df: pd.DataFrame, empty_msg: str):
+    with st.expander(title, expanded=True):
+        if df.empty:
+            st.caption(empty_msg)
+        else:
+            st.dataframe(df[summary_cols], use_container_width=True, hide_index=True)
+
+buy_df = result[result["최종판정"].isin(["신규매수 검토", "조건부 매수대기"])]
+manage_df = result[(result["보유상태"] == "보유") & (result["최종판정"].isin(["보유/추가매수 검토", "보유 유지/추가대기", "보유관리", "일부익절/보유관리", "분할매도 검토"]))]
+risk_df = result[result["최종판정"].isin(["트레이딩축소/코어확인", "비중축소 검토", "손절/전량정리 검토", "신규매수 제외"])]
+wait_df = result[result["최종판정"].isin(["진입대기", "추격금지", "관찰"])]
+
+t1, t2, t3, t4 = st.tabs(["신규매수/추가 후보", "보유관리", "위험관리", "대기/관찰"] )
+with t1:
+    if buy_df.empty:
+        st.caption("오늘 바로 볼 신규매수 후보가 없습니다.")
+    else:
+        st.dataframe(buy_df[summary_cols], use_container_width=True, hide_index=True)
+with t2:
+    if manage_df.empty:
+        st.caption("보유관리 대상이 없습니다. 보유종목 CSV를 올리면 더 정확해집니다.")
+    else:
+        st.dataframe(manage_df[summary_cols], use_container_width=True, hide_index=True)
+with t3:
+    if risk_df.empty:
+        st.caption("위험관리 우선 대상이 없습니다.")
+    else:
+        st.dataframe(risk_df[summary_cols], use_container_width=True, hide_index=True)
+with t4:
+    if wait_df.empty:
+        st.caption("대기/관찰 대상이 없습니다.")
+    else:
+        st.dataframe(wait_df[summary_cols], use_container_width=True, hide_index=True)
+
+with st.expander("실전 활용 순서", expanded=False):
+    st.markdown("""
+1. **장 시작 전**: 오늘 할 일에서 신규매수 후보·위험관리·추격금지 종목만 확인합니다.
+2. **장중**: 신규매수 후보는 현재가, 거래량배율, 손절폭만 봅니다. 거래량이 안 붙으면 기다립니다.
+3. **보유 종목**: 과열 신호는 전략타입에 따라 일부익절/코어유지/전량정리로 다르게 해석합니다.
+4. **장 마감 후**: 종가 기준으로 조건 체크리스트가 유지됐는지 확인하고, 필요하면 수급 CSV와 포트폴리오 CSV를 업데이트합니다.
+5. **주말**: 백테스트로 종목별 운용 타입을 다시 점검합니다.
+    """)
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("돌파 매수", int(result["행동신호"].isin(["강한 매수 후보", "1차 매수 가능"]).sum()))
@@ -991,10 +1193,11 @@ if not urgent.empty:
     )
 
 st.subheader("오늘의 후보")
-view_cols = ["행동신호", "전략타입", "실전해석", "알림우선순위", "상태", "종합점수", "종목", "티커", "섹터", "테마", "현재가", "손절가", "강제손절가", "RSI", "거래량배율", "20일수익률%", "구조점수", "종합수급점수", "실제수급점수", "수동수급기대", "수급판정", "수급데이터상태", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%", "차트점수", "뉴스점수", "피보구간", "경고"]
+view_cols = ["최종판정", "오늘할일", "보유상태", "평가손익%", "손절폭%", "행동신호", "전략타입", "실전해석", "알림우선순위", "상태", "종합점수", "종목", "티커", "섹터", "테마", "현재가", "평단가", "손절가", "강제손절가", "RSI", "거래량배율", "20일수익률%", "구조점수", "종합수급점수", "실제수급점수", "수동수급기대", "수급판정", "수급데이터상태", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%", "차트점수", "뉴스점수", "피보구간", "경고"]
 st.dataframe(
     result[view_cols].style.format({
         "현재가": format_price,
+        "평단가": format_price,
         "손절가": format_price,
         "강제손절가": format_price,
         "종합점수": lambda x: format_float(x, 1),
@@ -1004,6 +1207,8 @@ st.dataframe(
         "RSI": lambda x: format_float(x, 1),
         "거래량배율": lambda x: format_float(x, 2),
         "20일수익률%": lambda x: format_float(x, 1),
+        "평가손익%": lambda x: format_float(x, 1),
+        "손절폭%": lambda x: format_float(x, 1),
         "구조점수": lambda x: format_float(x, 1),
         "차트점수": lambda x: format_float(x, 1),
         "뉴스점수": lambda x: format_float(x, 1),
@@ -1048,16 +1253,16 @@ else:
     selected = enrich_selected_with_snapshot(selected, price_data.get(ticker, pd.DataFrame()))
 
     a, b, c, d = st.columns(4)
-    a.metric("행동 신호", selected["행동신호"])
-    b.metric("전략타입", selected.get("전략타입", "-"))
+    a.metric("최종판정", selected.get("최종판정", "-"))
+    b.metric("보유상태", selected.get("보유상태", "-"))
     c.metric("현재가", format_price(selected["현재가"]))
     d.metric("손절가", format_price(selected["손절가"]))
 
     e, f, g, h = st.columns(4)
-    e.metric("종합점수", f"{selected['종합점수']:.1f}")
-    f.metric("코어비중", f"{int(selected.get('코어비중%', 0))}%")
-    g.metric("트레이딩비중", f"{int(selected.get('트레이딩비중%', 0))}%")
-    h.metric("상태", selected.get("상태", "-"))
+    e.metric("행동신호", selected["행동신호"])
+    f.metric("전략타입", selected.get("전략타입", "-"))
+    g.metric("손절폭", "-" if pd.isna(selected.get("손절폭%")) else f"{float(selected.get('손절폭%')):.1f}%")
+    h.metric("평가손익", "-" if pd.isna(selected.get("평가손익%")) else f"{float(selected.get('평가손익%')):.1f}%")
 
     st.markdown("#### 전략타입별 실전 해석")
     st.info(str(selected.get("실전해석", "-")))
@@ -1075,6 +1280,11 @@ else:
 
     st.markdown(f"""
 ### {selected['종목']} · {selected['섹터']} · {selected['테마']}
+
+**오늘 할 일**  
+최종판정: {selected.get('최종판정', '-')}  
+오늘할일: {selected.get('오늘할일', '-')}  
+주문준비: {selected.get('주문준비', '-')}
 
 **전략타입 / 물량 관리**  
 전략타입: {selected.get('전략타입', '-')} · 코어 {selected.get('코어비중%', 0)}% / 트레이딩 {selected.get('트레이딩비중%', 0)}%  
@@ -1135,7 +1345,7 @@ else:
 
 
 st.subheader("백테스트")
-st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. v6.4는 Buy & Hold 비교, 추세보유형, 분할매도+추세보유, 코어보유형 청산을 지원합니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
+st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. v7은 오늘 할 일 요약·보유/미보유 구분·Buy & Hold 비교, 추세보유형, 분할매도+추세보유, 코어보유형 청산을 지원합니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
 
 if result.empty:
     st.info("백테스트할 종목이 없습니다.")
