@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 from datetime import datetime
 from pathlib import Path
 
@@ -558,6 +559,43 @@ def make_chart(df: pd.DataFrame, title: str):
     fig.update_layout(title=title, height=430, margin=dict(l=10, r=10, t=45, b=10), xaxis_rangeslider_visible=False)
     return fig
 
+
+def _safe_bt_number(value, default: float = 0.0) -> float:
+    """Safely convert table values like '데이터없음', '-', None, 2,764,000 to float."""
+    try:
+        if value is None or pd.isna(value):
+            return float(default)
+        if isinstance(value, str):
+            text = value.replace(',', '').strip()
+            if text in ['', '-', 'None', 'nan', 'NaN', '데이터없음', '확인불가']:
+                return float(default)
+            return float(text)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _call_run_backtest_compat(df: pd.DataFrame, **kwargs):
+    """Call run_backtest with only parameters supported by the deployed backtester.
+
+    This prevents Streamlit Cloud from crashing if app.py updates before
+    src/backtester.py is fully overwritten or cached.
+    """
+    try:
+        params = inspect.signature(run_backtest).parameters
+        filtered = {k: v for k, v in kwargs.items() if k in params}
+        return run_backtest(df, **filtered)
+    except TypeError:
+        # Last-resort fallback for older backtester versions.
+        fallback_keys = {
+            'strategy', 'structure_score', 'supply_score', 'structure_min', 'supply_min',
+            'volume_min', 'breakout_rsi_min', 'breakout_rsi_max', 'pullback_rsi_min',
+            'pullback_rsi_max', 'stop_loss_pct', 'take_profit_pct', 'sell_rsi',
+            'overheat_ret20', 'commission_bps', 'initial_capital'
+        }
+        filtered = {k: v for k, v in kwargs.items() if k in fallback_keys}
+        return run_backtest(df, **filtered)
+
 def make_backtest_chart(bt_data: pd.DataFrame, trades: pd.DataFrame, title: str):
     if bt_data is None or bt_data.empty:
         return None
@@ -904,7 +942,7 @@ else:
 
 
 st.subheader("백테스트")
-st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. v6.2는 Buy & Hold 비교, 추세보유형 청산, 분할매도+추세보유 청산을 지원합니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
+st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. v6.4는 Buy & Hold 비교, 추세보유형, 분할매도+추세보유, 코어보유형 청산을 지원합니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
 
 if result.empty:
     st.info("백테스트할 종목이 없습니다.")
@@ -918,9 +956,9 @@ else:
         bt_col4, bt_col5, bt_col6 = st.columns(3)
         bt_exit_mode = bt_col4.selectbox(
             "청산 방식",
-            ["추세보유형", "분할매도+추세보유", "기본형"],
+            ["코어보유형", "추세보유형", "분할매도+추세보유", "기본형"],
             index=0,
-            help="기본형은 짧은 스윙, 추세보유형은 60일선/추세 이탈까지 보유, 분할매도+추세보유는 과열 때 일부만 팔고 핵심 물량은 유지합니다.",
+            help="코어보유형은 과열 때 일부만 팔고 120일선/큰 추세 이탈까지 핵심 물량을 유지합니다. 추세보유형은 60일선 중심, 기본형은 짧은 스윙입니다.",
         )
         bt_stop = bt_col5.slider("고정 손절률 상한", 3.0, 20.0, 10.0, 0.5, help="기술적 손절선이 너무 멀면 이 손절률로 제한합니다.")
         bt_take_profit = bt_col6.slider("고정 익절률", 0.0, 100.0, 0.0, 1.0, help="0이면 고정 익절을 사용하지 않습니다. 추세주는 보통 0으로 두고 추세 이탈까지 보유하는 쪽을 먼저 비교하세요.")
@@ -945,12 +983,18 @@ else:
             st.error(f"백테스트 가격 데이터 조회 실패: {exc}")
             bt_hist = pd.DataFrame()
 
-        bt = run_backtest(
+        structure_val = _safe_bt_number(bt_selected.get("구조점수", 80), 80)
+        supply_val = _safe_bt_number(
+            bt_selected.get("종합수급점수", bt_selected.get("수동수급기대", 50)),
+            _safe_bt_number(bt_selected.get("수동수급기대", 50), 50),
+        )
+
+        bt = _call_run_backtest_compat(
             bt_hist,
             strategy=bt_strategy,
             exit_mode=bt_exit_mode,
-            structure_score=float(bt_selected.get("구조점수", 80)),
-            supply_score=float(bt_selected.get("종합수급점수", 50)),
+            structure_score=structure_val,
+            supply_score=supply_val,
             supply_min=float(bt_supply_min),
             volume_min=float(bt_vol),
             stop_loss_pct=float(bt_stop),
@@ -979,7 +1023,7 @@ else:
             m10.metric("최저/최고 거래", f"{_metric_fmt(m.get('최저수익률%'), 1, '%')} / {_metric_fmt(m.get('최고수익률%'), 1, '%')}")
 
             if float(m.get("초과수익률%", 0) or 0) < 0:
-                st.warning("이 설정은 단순 보유보다 수익률이 낮았습니다. 진입/청산 조건을 더 보수적으로 바꾸거나 추세보유형/분할매도형을 비교해보세요.")
+                st.warning("이 설정은 단순 보유보다 수익률이 낮았습니다. 초강한 추세주는 코어보유형/분할매도+추세보유형을 비교해보세요.")
             elif float(m.get("MDD%", 0) or 0) < -30:
                 st.warning("전략 MDD가 큽니다. 손절률, 거래량 조건, 청산 방식을 조절해서 낙폭을 줄일 수 있는지 확인하세요.")
             else:

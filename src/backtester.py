@@ -180,10 +180,11 @@ def run_backtest(
 ) -> BacktestResult:
     """Daily close based backtest.
 
-    v6.2 adds three exit styles:
+    v6.4 adds four exit styles:
       - 기본형: earlier fast exits; useful for short swing sanity checks.
       - 추세보유형: avoid selling only because RSI is high; hold until 60D trend/20D low breaks.
       - 분할매도+추세보유: take partial profits in overheat, keep the core until trend breaks.
+      - 코어보유형: take only partial profits in overheat and keep a core position until 120D/large trend breaks.
 
     Entry signal uses only information available at the signal candle and fills at
     next day's open. This is not broker-grade execution; it is for strategy comparison.
@@ -286,6 +287,8 @@ def run_backtest(
                     "signal_date": date,
                     "stop_price": stop_price,
                     "highest_close": close,
+                    "initial_shares": shares,
+                    "core_min_shares": shares * 0.50,
                     "partial1_done": False,
                     "partial2_done": False,
                 }
@@ -302,39 +305,60 @@ def run_backtest(
         high = _safe_float(row.get("high"), close)
         ma20 = _safe_float(row.get("ma20"))
         ma60 = _safe_float(row.get("ma60"))
+        ma120 = _safe_float(row.get("ma120"))
         low20_prev = _safe_float(row.get("low20_prev"))
         rsi = _safe_float(row.get("rsi14"), 50.0)
         ret20 = _safe_float(row.get("ret_20d"), 0.0)
+        highest_close = _safe_float(position.get("highest_close"), close)
+        profit_pct = (close / entry_price - 1.0) * 100.0 if entry_price > 0 and pd.notna(close) else 0.0
 
         if pd.notna(close):
             position["highest_close"] = max(float(position.get("highest_close", close)), float(close))
 
-        # Trend-mode trailing stop: use broader trend support, not just fast 20D noise.
-        trail_candidates = [stop_price]
-        if pd.notna(ma60) and ma60 > 0 and ma60 < close:
-            trail_candidates.append(float(ma60) * 0.985)
-        if pd.notna(low20_prev) and low20_prev > 0 and low20_prev < close:
-            trail_candidates.append(float(low20_prev) * 0.98)
-        trend_stop = max(trail_candidates)
-        position["stop_price"] = max(stop_price, trend_stop)
+        # Stop handling by exit style.
+        # Basic/trend modes trail around 60D/20D supports. Core mode gives strong leaders
+        # more room so that a temporary 20D/60D shakeout does not cut the whole position.
+        if exit_mode == "코어보유형":
+            core_stop_candidates = [stop_price]
+            if profit_pct >= 20.0:
+                # Once a position is a meaningful winner, do not let the core turn into a large loss.
+                core_stop_candidates.append(entry_price * 0.95)
+                if pd.notna(ma120) and ma120 > 0 and ma120 < close:
+                    core_stop_candidates.append(float(ma120) * 0.97)
+                if pd.notna(highest_close) and highest_close > 0:
+                    core_stop_candidates.append(float(highest_close) * 0.70)  # 30% peak drawdown guard
+            position["stop_price"] = max(core_stop_candidates)
+        else:
+            # Trend-mode trailing stop: use broader trend support, not just fast 20D noise.
+            trail_candidates = [stop_price]
+            if pd.notna(ma60) and ma60 > 0 and ma60 < close:
+                trail_candidates.append(float(ma60) * 0.985)
+            if pd.notna(low20_prev) and low20_prev > 0 and low20_prev < close:
+                trail_candidates.append(float(low20_prev) * 0.98)
+            trend_stop = max(trail_candidates)
+            position["stop_price"] = max(stop_price, trend_stop)
         stop_price = float(position["stop_price"])
 
         # Partial profit taking first, if enabled. It does not close the core.
-        if exit_mode == "분할매도+추세보유" and shares > 0:
+        if exit_mode in ["분할매도+추세보유", "코어보유형"] and shares > 0:
             overheat1 = rsi >= sell_rsi or (pd.notna(ret20) and ret20 >= overheat_ret20)
             overheat2 = rsi >= 83.0 or (pd.notna(ret20) and ret20 >= 50.0)
-            if overheat1 and not position.get("partial1_done", False) and partial_ratio > 0:
-                sell_shares = shares * partial_ratio
+            core_min_shares = float(position.get("core_min_shares", 0.0)) if exit_mode == "코어보유형" else 0.0
+            sellable_shares = max(0.0, shares - core_min_shares)
+            if overheat1 and not position.get("partial1_done", False) and partial_ratio > 0 and sellable_shares > 0:
+                sell_shares = min(shares * partial_ratio, sellable_shares)
+                actual_ratio = sell_shares / max(shares, 1e-12)
                 cash += sell_shares * close * (1.0 - commission)
                 shares -= sell_shares
                 position["partial1_done"] = True
-                record_event("분할매도1", date, close, partial_ratio, "과열 1차 분할매도", entry_type, entry_date, entry_price, stop_price, current_equity(row))
-            elif overheat2 and not position.get("partial2_done", False) and partial_ratio > 0:
-                sell_shares = shares * partial_ratio
+                record_event("분할매도1", date, close, actual_ratio, "과열 1차 분할매도", entry_type, entry_date, entry_price, stop_price, current_equity(row))
+            elif overheat2 and not position.get("partial2_done", False) and partial_ratio > 0 and sellable_shares > 0:
+                sell_shares = min(shares * partial_ratio, sellable_shares)
+                actual_ratio = sell_shares / max(shares, 1e-12)
                 cash += sell_shares * close * (1.0 - commission)
                 shares -= sell_shares
                 position["partial2_done"] = True
-                record_event("분할매도2", date, close, partial_ratio, "극단과열 2차 분할매도", entry_type, entry_date, entry_price, stop_price, current_equity(row))
+                record_event("분할매도2", date, close, actual_ratio, "극단과열 2차 분할매도", entry_type, entry_date, entry_price, stop_price, current_equity(row))
 
         exit_price = np.nan
         exit_reason = ""
@@ -355,6 +379,25 @@ def run_backtest(
             elif rsi >= sell_rsi or (pd.notna(ret20) and ret20 >= overheat_ret20):
                 exit_price = close
                 exit_reason = "과열매도"
+        elif exit_mode == "코어보유형":
+            # Core holding: full sell only on broad trend break or severe peak drawdown.
+            peak_drawdown = close / highest_close - 1.0 if pd.notna(highest_close) and highest_close > 0 else 0.0
+            if pd.notna(low) and low <= stop_price and profit_pct < 20.0:
+                exit_price = stop_price
+                exit_reason = "초기손절"
+            elif take_profit_pct and pd.notna(high) and high >= entry_price * (1 + take_profit_pct / 100.0):
+                # If a fixed take-profit is intentionally set, close the remainder.
+                exit_price = entry_price * (1 + take_profit_pct / 100.0)
+                exit_reason = f"고정익절 {take_profit_pct:.1f}%"
+            elif pd.notna(ma120) and close < ma120 and rsi < 50:
+                exit_price = close
+                exit_reason = "120일선 이탈"
+            elif peak_drawdown <= -0.30 and rsi < 55:
+                exit_price = close
+                exit_reason = "고점대비 30% 하락"
+            elif pd.notna(ma60) and close < ma60 and rsi < 40:
+                exit_price = close
+                exit_reason = "60일선+RSI 급약세"
         else:
             # Trend holding: overheat alone is not a full sell. Let winners run.
             if pd.notna(low) and low <= stop_price:
