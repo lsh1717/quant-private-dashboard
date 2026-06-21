@@ -569,6 +569,8 @@ def make_backtest_chart(bt_data: pd.DataFrame, trades: pd.DataFrame, title: str)
         fig.add_trace(go.Scatter(x=bt_data.index, y=bt_data["ma60"], mode="lines", name="60일선"))
     if trades is not None and not trades.empty:
         entries = trades.dropna(subset=["진입일", "진입가"]).copy()
+        if "진입일" in entries.columns:
+            entries = entries.drop_duplicates(subset=["진입일", "진입가"], keep="first")
         exits = trades.dropna(subset=["청산일", "청산가"]).copy()
         fig.add_trace(go.Scatter(
             x=entries["진입일"], y=entries["진입가"], mode="markers",
@@ -576,7 +578,7 @@ def make_backtest_chart(bt_data: pd.DataFrame, trades: pd.DataFrame, title: str)
         ))
         fig.add_trace(go.Scatter(
             x=exits["청산일"], y=exits["청산가"], mode="markers",
-            name="매도", marker=dict(symbol="triangle-down", size=11)
+            name="매도/분할매도", marker=dict(symbol="triangle-down", size=11)
         ))
     fig.update_layout(title=title, height=430, margin=dict(l=10, r=10, t=45, b=10), xaxis_rangeslider_visible=False)
     return fig
@@ -902,7 +904,7 @@ else:
 
 
 st.subheader("백테스트")
-st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
+st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. v6.2는 Buy & Hold 비교, 추세보유형 청산, 분할매도+추세보유 청산을 지원합니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
 
 if result.empty:
     st.info("백테스트할 종목이 없습니다.")
@@ -911,17 +913,26 @@ else:
         bt_col1, bt_col2, bt_col3 = st.columns(3)
         bt_name = bt_col1.selectbox("백테스트 종목", result["종목"].tolist(), key="bt_name")
         bt_period = bt_col2.selectbox("백테스트 기간", ["6mo", "1y", "2y", "5y", "max"], index=3)
-        bt_strategy = bt_col3.selectbox("전략", ["돌파+눌림", "돌파", "눌림"], index=0)
+        bt_strategy = bt_col3.selectbox("진입 전략", ["돌파+눌림", "돌파", "눌림"], index=0)
 
         bt_col4, bt_col5, bt_col6 = st.columns(3)
-        bt_stop = bt_col4.slider("고정 손절률 상한", 3.0, 15.0, 7.0, 0.5, help="기술적 손절선이 너무 멀면 이 손절률로 제한합니다.")
-        bt_take_profit = bt_col5.slider("고정 익절률", 0.0, 50.0, 0.0, 1.0, help="0이면 고정 익절을 사용하지 않습니다.")
-        bt_fee = bt_col6.number_input("왕복 전 편도 수수료(bps)", min_value=0.0, max_value=100.0, value=1.5, step=0.5)
+        bt_exit_mode = bt_col4.selectbox(
+            "청산 방식",
+            ["추세보유형", "분할매도+추세보유", "기본형"],
+            index=0,
+            help="기본형은 짧은 스윙, 추세보유형은 60일선/추세 이탈까지 보유, 분할매도+추세보유는 과열 때 일부만 팔고 핵심 물량은 유지합니다.",
+        )
+        bt_stop = bt_col5.slider("고정 손절률 상한", 3.0, 20.0, 10.0, 0.5, help="기술적 손절선이 너무 멀면 이 손절률로 제한합니다.")
+        bt_take_profit = bt_col6.slider("고정 익절률", 0.0, 100.0, 0.0, 1.0, help="0이면 고정 익절을 사용하지 않습니다. 추세주는 보통 0으로 두고 추세 이탈까지 보유하는 쪽을 먼저 비교하세요.")
 
         bt_col7, bt_col8, bt_col9 = st.columns(3)
-        bt_vol = bt_col7.slider("돌파 거래량 배율", 1.0, 3.0, 1.3, 0.1)
-        bt_supply_min = bt_col8.slider("수급점수 최소값", 0, 100, 50, 5, help="과거 수급 데이터가 없으므로 현재 종합수급점수를 고정값으로 사용합니다.")
-        bt_capital = bt_col9.number_input("초기자본", min_value=100000.0, value=10000000.0, step=1000000.0)
+        bt_fee = bt_col7.number_input("왕복 전 편도 수수료(bps)", min_value=0.0, max_value=100.0, value=1.5, step=0.5)
+        bt_vol = bt_col8.slider("돌파 거래량 배율", 1.0, 3.0, 1.3, 0.1)
+        bt_supply_min = bt_col9.slider("수급점수 최소값", 0, 100, 50, 5, help="과거 수급 데이터가 없으므로 현재 종합수급점수를 고정값으로 사용합니다.")
+
+        bt_col10, bt_col11 = st.columns(2)
+        bt_partial = bt_col10.slider("분할매도 비중", 10.0, 50.0, 30.0, 5.0, help="청산 방식이 분할매도+추세보유일 때 과열 구간마다 매도할 비중입니다.")
+        bt_capital = bt_col11.number_input("초기자본", min_value=100000.0, value=10000000.0, step=1000000.0)
 
         run_bt = st.button("백테스트 실행", type="primary")
 
@@ -937,6 +948,7 @@ else:
         bt = run_backtest(
             bt_hist,
             strategy=bt_strategy,
+            exit_mode=bt_exit_mode,
             structure_score=float(bt_selected.get("구조점수", 80)),
             supply_score=float(bt_selected.get("종합수급점수", 50)),
             supply_min=float(bt_supply_min),
@@ -945,6 +957,7 @@ else:
             take_profit_pct=float(bt_take_profit),
             commission_bps=float(bt_fee),
             initial_capital=float(bt_capital),
+            partial_sell_pct=float(bt_partial),
         )
 
         if bt.metrics.get("오류"):
@@ -954,14 +967,23 @@ else:
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("총 거래", f"{int(m.get('총 거래', 0))}회")
             m2.metric("승률", _metric_fmt(m.get("승률%"), 1, "%"))
-            m3.metric("평균수익률", _metric_fmt(m.get("평균수익률%"), 2, "%"))
-            m4.metric("누적수익률", _metric_fmt(m.get("누적수익률%"), 1, "%"))
-            m5.metric("MDD", _metric_fmt(m.get("MDD%"), 1, "%"))
+            m3.metric("전략 누적", _metric_fmt(m.get("누적수익률%"), 1, "%"))
+            m4.metric("Buy & Hold", _metric_fmt(m.get("매수보유수익률%"), 1, "%"))
+            m5.metric("초과수익", _metric_fmt(m.get("초과수익률%"), 1, "%"))
 
-            m6, m7, m8 = st.columns(3)
-            m6.metric("평균 보유일", _metric_fmt(m.get("평균보유일"), 1, "일"))
-            m7.metric("손익비", _metric_fmt(m.get("손익비"), 2))
-            m8.metric("최저/최고 거래", f"{_metric_fmt(m.get('최저수익률%'), 1, '%')} / {_metric_fmt(m.get('최고수익률%'), 1, '%')}")
+            m6, m7, m8, m9, m10 = st.columns(5)
+            m6.metric("전략 MDD", _metric_fmt(m.get("MDD%"), 1, "%"))
+            m7.metric("보유 MDD", _metric_fmt(m.get("매수보유MDD%"), 1, "%"))
+            m8.metric("평균 보유일", _metric_fmt(m.get("평균보유일"), 1, "일"))
+            m9.metric("손익비", _metric_fmt(m.get("손익비"), 2))
+            m10.metric("최저/최고 거래", f"{_metric_fmt(m.get('최저수익률%'), 1, '%')} / {_metric_fmt(m.get('최고수익률%'), 1, '%')}")
+
+            if float(m.get("초과수익률%", 0) or 0) < 0:
+                st.warning("이 설정은 단순 보유보다 수익률이 낮았습니다. 진입/청산 조건을 더 보수적으로 바꾸거나 추세보유형/분할매도형을 비교해보세요.")
+            elif float(m.get("MDD%", 0) or 0) < -30:
+                st.warning("전략 MDD가 큽니다. 손절률, 거래량 조건, 청산 방식을 조절해서 낙폭을 줄일 수 있는지 확인하세요.")
+            else:
+                st.success("단순 보유 대비 성과와 MDD를 함께 확인하세요. 거래 횟수가 너무 적으면 신뢰도는 낮습니다.")
 
             chart = make_backtest_chart(bt.data, bt.trades, f"{bt_name} 백테스트 매수/매도 표시")
             if chart:
@@ -969,8 +991,15 @@ else:
 
             if not bt.equity_curve.empty:
                 eq_fig = go.Figure()
-                eq_fig.add_trace(go.Scatter(x=bt.equity_curve["date"], y=bt.equity_curve["equity"], mode="lines+markers", name="실현 자본"))
-                eq_fig.update_layout(title="실현 기준 자본 곡선", height=320, margin=dict(l=10, r=10, t=45, b=10))
+                eq_fig.add_trace(go.Scatter(x=bt.equity_curve["date"], y=bt.equity_curve["equity"], mode="lines+markers", name="전략 자본"))
+                try:
+                    bh_close = bt.data.loc[bt.equity_curve["date"], "close"].astype(float)
+                    if len(bh_close) > 1 and bh_close.iloc[0] > 0:
+                        bh_equity = float(bt_capital) * (bh_close / bh_close.iloc[0])
+                        eq_fig.add_trace(go.Scatter(x=bt.equity_curve["date"], y=bh_equity, mode="lines", name="Buy & Hold 비교"))
+                except Exception:
+                    pass
+                eq_fig.update_layout(title="전략 자본 vs Buy & Hold", height=320, margin=dict(l=10, r=10, t=45, b=10))
                 st.plotly_chart(eq_fig, use_container_width=True)
 
             st.markdown("#### 거래 기록")
@@ -996,7 +1025,7 @@ else:
                     mime="text/csv",
                 )
 
-            st.caption("주의: 이 백테스트는 일봉 기반 단순 검증입니다. 신호일 종가 확인 후 다음 거래일 시가 진입, 일중 손절은 저가 기준으로 근사합니다. 슬리피지, 세금, 호가 공백, 뉴스·수급 과거 변화는 완전히 반영하지 않습니다.")
+            st.caption("주의: 이 백테스트는 일봉 기반 단순 검증입니다. 신호일 종가 확인 후 다음 거래일 시가 진입, 일중 손절은 저가 기준으로 근사합니다. v6.2의 추세보유형은 과열만으로 전량매도하지 않고 60일선/추세 이탈까지 핵심 물량을 유지합니다. 슬리피지, 세금, 호가 공백, 뉴스·수급 과거 변화는 완전히 반영하지 않습니다.")
 
 st.divider()
 st.caption(
