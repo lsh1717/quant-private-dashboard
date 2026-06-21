@@ -13,6 +13,7 @@ from src.data_sources import fetch_price_history, load_keywords, load_watchlist,
 from src.indicators import add_indicators, latest_snapshot
 from src.scoring import build_trade_plan, manual_structure_score, news_score, technical_score
 from src.krx_sources import build_flow_pack, investor_flow_score, investor_flow_signal, short_score, short_signal
+from src.backtester import run_backtest
 
 load_dotenv()
 BASE_DIR = Path(__file__).parent
@@ -495,6 +496,40 @@ def make_chart(df: pd.DataFrame, title: str):
     fig.update_layout(title=title, height=430, margin=dict(l=10, r=10, t=45, b=10), xaxis_rangeslider_visible=False)
     return fig
 
+def make_backtest_chart(bt_data: pd.DataFrame, trades: pd.DataFrame, title: str):
+    if bt_data is None or bt_data.empty:
+        return None
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=bt_data.index, y=bt_data["close"], mode="lines", name="종가"))
+    if "ma20" in bt_data.columns:
+        fig.add_trace(go.Scatter(x=bt_data.index, y=bt_data["ma20"], mode="lines", name="20일선"))
+    if "ma60" in bt_data.columns:
+        fig.add_trace(go.Scatter(x=bt_data.index, y=bt_data["ma60"], mode="lines", name="60일선"))
+    if trades is not None and not trades.empty:
+        entries = trades.dropna(subset=["진입일", "진입가"]).copy()
+        exits = trades.dropna(subset=["청산일", "청산가"]).copy()
+        fig.add_trace(go.Scatter(
+            x=entries["진입일"], y=entries["진입가"], mode="markers",
+            name="매수", marker=dict(symbol="triangle-up", size=11)
+        ))
+        fig.add_trace(go.Scatter(
+            x=exits["청산일"], y=exits["청산가"], mode="markers",
+            name="매도", marker=dict(symbol="triangle-down", size=11)
+        ))
+    fig.update_layout(title=title, height=430, margin=dict(l=10, r=10, t=45, b=10), xaxis_rangeslider_visible=False)
+    return fig
+
+
+def _metric_fmt(value, digits: int = 1, suffix: str = "") -> str:
+    try:
+        if value == float("inf"):
+            return "무한"
+        if pd.isna(value):
+            return "-"
+        return f"{float(value):,.{digits}f}{suffix}"
+    except Exception:
+        return "-"
+
 
 st.title("개인 투자 대시보드")
 st.caption("네 기준: 내러티브 → 정책/CAPEX → 병목/공급제한 → 지속 매수 주체 → 아직 덜 반영된 구간 → 차트 확인")
@@ -798,6 +833,104 @@ else:
                 st.markdown(f"- {title}")
             if published:
                 st.caption(published)
+
+
+st.subheader("백테스트")
+st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
+
+if result.empty:
+    st.info("백테스트할 종목이 없습니다.")
+else:
+    with st.expander("백테스트 설정", expanded=False):
+        bt_col1, bt_col2, bt_col3 = st.columns(3)
+        bt_name = bt_col1.selectbox("백테스트 종목", result["종목"].tolist(), key="bt_name")
+        bt_period = bt_col2.selectbox("백테스트 기간", ["6mo", "1y", "2y", "5y", "max"], index=3)
+        bt_strategy = bt_col3.selectbox("전략", ["돌파+눌림", "돌파", "눌림"], index=0)
+
+        bt_col4, bt_col5, bt_col6 = st.columns(3)
+        bt_stop = bt_col4.slider("고정 손절률 상한", 3.0, 15.0, 7.0, 0.5, help="기술적 손절선이 너무 멀면 이 손절률로 제한합니다.")
+        bt_take_profit = bt_col5.slider("고정 익절률", 0.0, 50.0, 0.0, 1.0, help="0이면 고정 익절을 사용하지 않습니다.")
+        bt_fee = bt_col6.number_input("왕복 전 편도 수수료(bps)", min_value=0.0, max_value=100.0, value=1.5, step=0.5)
+
+        bt_col7, bt_col8, bt_col9 = st.columns(3)
+        bt_vol = bt_col7.slider("돌파 거래량 배율", 1.0, 3.0, 1.3, 0.1)
+        bt_supply_min = bt_col8.slider("수급점수 최소값", 0, 100, 50, 5, help="과거 수급 데이터가 없으므로 현재 종합수급점수를 고정값으로 사용합니다.")
+        bt_capital = bt_col9.number_input("초기자본", min_value=100000.0, value=10000000.0, step=1000000.0)
+
+        run_bt = st.button("백테스트 실행", type="primary")
+
+    if run_bt:
+        bt_selected = result[result["종목"] == bt_name].iloc[0]
+        bt_ticker = str(bt_selected["티커"])
+        try:
+            bt_hist = cached_price(bt_ticker, bt_period, "1d")
+        except Exception as exc:
+            st.error(f"백테스트 가격 데이터 조회 실패: {exc}")
+            bt_hist = pd.DataFrame()
+
+        bt = run_backtest(
+            bt_hist,
+            strategy=bt_strategy,
+            structure_score=float(bt_selected.get("구조점수", 80)),
+            supply_score=float(bt_selected.get("종합수급점수", 50)),
+            supply_min=float(bt_supply_min),
+            volume_min=float(bt_vol),
+            stop_loss_pct=float(bt_stop),
+            take_profit_pct=float(bt_take_profit),
+            commission_bps=float(bt_fee),
+            initial_capital=float(bt_capital),
+        )
+
+        if bt.metrics.get("오류"):
+            st.warning(bt.metrics["오류"])
+        else:
+            m = bt.metrics
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("총 거래", f"{int(m.get('총 거래', 0))}회")
+            m2.metric("승률", _metric_fmt(m.get("승률%"), 1, "%"))
+            m3.metric("평균수익률", _metric_fmt(m.get("평균수익률%"), 2, "%"))
+            m4.metric("누적수익률", _metric_fmt(m.get("누적수익률%"), 1, "%"))
+            m5.metric("MDD", _metric_fmt(m.get("MDD%"), 1, "%"))
+
+            m6, m7, m8 = st.columns(3)
+            m6.metric("평균 보유일", _metric_fmt(m.get("평균보유일"), 1, "일"))
+            m7.metric("손익비", _metric_fmt(m.get("손익비"), 2))
+            m8.metric("최저/최고 거래", f"{_metric_fmt(m.get('최저수익률%'), 1, '%')} / {_metric_fmt(m.get('최고수익률%'), 1, '%')}")
+
+            chart = make_backtest_chart(bt.data, bt.trades, f"{bt_name} 백테스트 매수/매도 표시")
+            if chart:
+                st.plotly_chart(chart, use_container_width=True)
+
+            if not bt.equity_curve.empty:
+                eq_fig = go.Figure()
+                eq_fig.add_trace(go.Scatter(x=bt.equity_curve["date"], y=bt.equity_curve["equity"], mode="lines+markers", name="실현 자본"))
+                eq_fig.update_layout(title="실현 기준 자본 곡선", height=320, margin=dict(l=10, r=10, t=45, b=10))
+                st.plotly_chart(eq_fig, use_container_width=True)
+
+            st.markdown("#### 거래 기록")
+            if bt.trades.empty:
+                st.info("해당 조건으로 발생한 거래가 없습니다. 기간을 늘리거나 조건을 완화해보세요.")
+            else:
+                show_trades = bt.trades.copy()
+                st.dataframe(
+                    show_trades.style.format({
+                        "진입가": format_price,
+                        "청산가": format_price,
+                        "손절가": format_price,
+                        "수익률%": lambda x: format_float(x, 2),
+                        "자본": format_price,
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.download_button(
+                    "백테스트 거래기록 CSV 다운로드",
+                    data=show_trades.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"backtest_{bt_ticker}.csv",
+                    mime="text/csv",
+                )
+
+            st.caption("주의: 이 백테스트는 일봉 기반 단순 검증입니다. 신호일 종가 확인 후 다음 거래일 시가 진입, 일중 손절은 저가 기준으로 근사합니다. 슬리피지, 세금, 호가 공백, 뉴스·수급 과거 변화는 완전히 반영하지 않습니다.")
 
 st.divider()
 st.caption(
