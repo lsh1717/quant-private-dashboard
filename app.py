@@ -289,12 +289,74 @@ def format_percent(x: float, digits: int = 2) -> str:
 
 
 def safe_float_value(x, default=None):
+    """Robustly convert dashboard cells to float.
+
+Streamlit/Pandas may occasionally pass values as formatted strings
+(e.g. "2,764,000", "-", "None") when a row is selected.
+This function accepts both raw numeric values and display-like strings so
+condition checklists do not fall back to 확인불가 unnecessarily.
+"""
     try:
+        if x is None:
+            return default
+        if isinstance(x, str):
+            text = x.strip()
+            if text in ["", "-", "None", "none", "nan", "NaN", "데이터없음"]:
+                return default
+            parsed = _to_number(text.replace("%", ""))
+            if pd.isna(parsed):
+                return default
+            return float(parsed)
         if pd.isna(x):
             return default
         return float(x)
     except Exception:
         return default
+
+
+def enrich_selected_with_snapshot(selected: pd.Series, hist: pd.DataFrame) -> pd.Series:
+    """Fill selected-row checklist fields from the already loaded price data.
+
+The main table can show price/RSI values correctly while the checklist may
+receive blanks from a styled/display row in some Streamlit Cloud sessions.
+This makes the checklist use the same latest_snapshot source as the main
+summary table, preventing false '확인불가' rows.
+"""
+    s = selected.copy()
+    try:
+        snap = latest_snapshot(hist) if hist is not None and not hist.empty else {}
+    except Exception:
+        snap = {}
+    if not snap:
+        return s
+
+    mapping = {
+        "현재가": "close",
+        "20일선": "ma20",
+        "60일선": "ma60",
+        "20일고점": "high20",
+        "20일저점": "low20",
+        "60일고점": "high60",
+        "60일저점": "low60",
+        "피보38.2": "fib382",
+        "피보50": "fib50",
+        "피보61.8": "fib618",
+    }
+    for col, key in mapping.items():
+        val = snap.get(key)
+        if val is not None and not pd.isna(val):
+            s[col] = val
+
+    if snap.get("rsi14") is not None and not pd.isna(snap.get("rsi14")):
+        s["RSI"] = round(float(snap.get("rsi14")), 1)
+    if snap.get("volume_ratio") is not None and not pd.isna(snap.get("volume_ratio")):
+        s["거래량배율"] = round(float(snap.get("volume_ratio")), 2)
+    if snap.get("ret_20d") is not None and not pd.isna(snap.get("ret_20d")):
+        s["20일수익률%"] = round(float(snap.get("ret_20d")), 1)
+    if snap.get("fib_zone") is not None:
+        s["피보구간"] = "예" if snap.get("fib_zone") else "아니오"
+
+    return s
 
 
 def pass_label(ok: bool | None) -> str:
@@ -762,6 +824,10 @@ else:
     selected_name = st.selectbox("종목 선택", result["종목"].tolist())
     selected = result[result["종목"] == selected_name].iloc[0]
     ticker = selected["티커"]
+    # 조건 체크리스트는 위쪽 표와 같은 최신 가격 스냅샷을 사용하도록 보정합니다.
+    # 일부 Streamlit Cloud 세션에서 선택 행의 가격/이평/RSI 값이 표시 문자열로 변해
+    # 확인불가로 뜨는 문제를 방지합니다.
+    selected = enrich_selected_with_snapshot(selected, price_data.get(ticker, pd.DataFrame()))
 
     a, b, c, d = st.columns(4)
     a.metric("행동 신호", selected["행동신호"])
