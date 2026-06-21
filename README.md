@@ -1,22 +1,52 @@
-# 개인 투자 대시보드 MVP v6.5
+# 개인 투자 대시보드 v9 Flow
 
-네 투자 기준을 기반으로 종목을 점수화하고, 가격·거래량·RSI·이동평균·피보나치·뉴스·수급 CSV를 반영해 후보를 정리하는 개인용 Streamlit 대시보드입니다.
+네 투자 기준을 기반으로 종목을 점수화하고, 가격·거래량·RSI·이동평균·피보나치·뉴스·기관/외국인 수급을 반영해 **오늘 무엇을 해야 하는지** 정리하는 개인용 Streamlit 대시보드입니다.
 
-## v6.5 핵심 변경
+## v9 핵심 변경
 
-- 종목별 `전략타입` 추가
-  - 코어보유형
-  - 코어+스윙형
-  - 추세스윙형
-  - 트레이딩형
-  - 관찰형
-- 코어비중/트레이딩비중 추가
-- 같은 신호라도 전략타입별로 다르게 해석
-  - 코어보유형의 `분할매도 우선`은 전량매도가 아니라 일부익절/코어유지
-  - 트레이딩형의 `손절위험`은 빠른 정리 우선
-- 종목별 매매 계획에 `전략타입별 실전 해석` 추가
-- `watchlist.csv`에 Sandisk Corporation, Kioxia Holdings Corporation 예시 추가
-- v6.4의 코어보유형 백테스트 기능 유지
+- 기관/외국인 수급을 단순 점수뿐 아니라 **변화 방향**으로 해석
+  - 쌍끌이 매수
+  - 쌍끌이 매도
+  - 수급개선
+  - 수급악화
+  - 기관 재진입
+  - 외국인 재진입
+  - 기관/외국인 단기이탈
+- 후보를 더 단순하게 자동 분류
+  - A급 매수 후보
+  - B급 매수 후보
+  - 수급선행 후보
+  - 수급 없는 반등
+  - 보유관리
+  - 추격금지
+  - 위험관리
+- 오늘 할 일 화면 강화
+  - A급 후보 탭
+  - 신규매수/추가 후보 탭
+  - 수급선행/수급주의 탭
+  - 보유관리 탭
+  - 위험·대기 탭
+- 종목별 매매 계획에 바로 쓸 수 있는 가격 계획 추가
+  - 매수구간
+  - 손절계획
+  - 분할매도구간
+- GitHub Actions 무료 자동수급 구조 유지
+  - `collector/update_flow_cache.py`
+  - `.github/workflows/update-flow-cache.yml`
+  - `data/flow_auto.csv`
+
+## 무료 수급 자동화 구조
+
+```text
+GitHub Actions
+→ 평일 한국시간 장마감 후 자동 실행
+→ pykrx/KRX 수급 조회 시도
+→ 실패하면 Naver Finance 기관/외국인 수급 fallback
+→ data/flow_auto.csv 자동 저장
+→ Streamlit 대시보드가 flow_auto.csv 읽기
+```
+
+현재 무료 구조에서는 기관/외국인 수급은 자동화 가능성이 높고, 연기금/공매도는 환경에 따라 비어 있을 수 있습니다.
 
 ## 배포
 
@@ -34,6 +64,16 @@ Secrets 예시:
 ```toml
 DASHBOARD_PASSWORD = "원하는비밀번호"
 ```
+
+## GitHub Actions 수급 실행
+
+파일 업로드 후 GitHub에서:
+
+```text
+Actions → Update KRX Flow Cache → Run workflow
+```
+
+실행 후 `data/flow_auto.csv`에 종목 행이 생기면 성공입니다. 이후 Streamlit에서 `Manage app → Reboot app`을 하면 대시보드에 반영됩니다.
 
 ## watchlist.csv 컬럼
 

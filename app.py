@@ -19,7 +19,7 @@ from src.backtester import run_backtest
 load_dotenv()
 BASE_DIR = Path(__file__).parent
 
-st.set_page_config(page_title="개인 투자 대시보드 v8 Free", page_icon="📈", layout="wide")
+st.set_page_config(page_title="개인 투자 대시보드 v9 Flow", page_icon="📈", layout="wide")
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -35,7 +35,7 @@ def password_gate() -> None:
         return
     if st.session_state.get("authenticated"):
         return
-    st.title("개인 투자 대시보드 v8 Free")
+    st.title("개인 투자 대시보드 v9 Flow")
     pw = st.text_input("비밀번호", type="password")
     if st.button("입장"):
         if pw == expected:
@@ -929,11 +929,202 @@ def build_final_decision(row: dict, holding: bool) -> tuple[str, str, str]:
             decision = "관찰"
             task = "확정 매수 신호 없음. 조건 체크리스트에서 핵심 미충족 항목 확인."
 
+    # 수급 변화와 후보 등급을 오늘 할 일에 반영합니다.
+    flow_summary = str(row.get("수급변화요약", "")).strip()
+    grade = str(row.get("후보등급", "")).strip()
+    if flow_summary and flow_summary not in ["-", "데이터없음"] and decision in ["신규매수 검토", "조건부 매수대기", "진입대기", "보유/추가매수 검토", "보유 유지/추가대기"]:
+        task += f" 수급: {flow_summary}."
+    if grade in ["A급 매수 후보", "B급 매수 후보", "수급선행 후보"] and decision in ["신규매수 검토", "조건부 매수대기", "진입대기"]:
+        task = f"[{grade}] " + task
+
     prep = f"가격 알림: 손절 {stop}, 강제손절 {hard_stop}, 돌파 {high20}"
     return decision, task, prep
 
 
-st.title("개인 투자 대시보드 v8 Free")
+def _signed_count(*values) -> tuple[int, int]:
+    pos = 0
+    neg = 0
+    for v in values:
+        x = safe_float_value(v)
+        if x is None:
+            continue
+        if x > 0:
+            pos += 1
+        elif x < 0:
+            neg += 1
+    return pos, neg
+
+
+def classify_flow_trend(flow: dict) -> tuple[str, str, float]:
+    """Judge whether institutional/foreign flow is improving or deteriorating.
+
+    The collector can fill only institution/foreign fields through Naver fallback.
+    This function intentionally works even when pension/short data is blank.
+    """
+    if not flow or not flow.get("available"):
+        return "데이터없음", "기관/외국인 수급 데이터 없음", 50.0
+
+    inst5 = safe_float_value(flow.get("inst_5d"))
+    inst20 = safe_float_value(flow.get("inst_20d"))
+    foreign5 = safe_float_value(flow.get("foreign_5d"))
+    foreign20 = safe_float_value(flow.get("foreign_20d"))
+
+    pos5, neg5 = _signed_count(inst5, foreign5)
+    pos20, neg20 = _signed_count(inst20, foreign20)
+
+    score = 50.0
+    reasons = []
+
+    if inst5 is not None:
+        score += 12 if inst5 > 0 else -12 if inst5 < 0 else 0
+        reasons.append("기관5일+" if inst5 > 0 else "기관5일-" if inst5 < 0 else "기관5일0")
+    if foreign5 is not None:
+        score += 12 if foreign5 > 0 else -12 if foreign5 < 0 else 0
+        reasons.append("외국인5일+" if foreign5 > 0 else "외국인5일-" if foreign5 < 0 else "외국인5일0")
+    if inst20 is not None:
+        score += 6 if inst20 > 0 else -6 if inst20 < 0 else 0
+    if foreign20 is not None:
+        score += 6 if foreign20 > 0 else -6 if foreign20 < 0 else 0
+
+    inst_reentry = inst5 is not None and inst5 > 0 and (inst20 is None or inst20 <= 0)
+    foreign_reentry = foreign5 is not None and foreign5 > 0 and (foreign20 is None or foreign20 <= 0)
+    inst_exit = inst5 is not None and inst5 < 0 and inst20 is not None and inst20 > 0
+    foreign_exit = foreign5 is not None and foreign5 < 0 and foreign20 is not None and foreign20 > 0
+
+    # 5일 평균이 20일 평균보다 좋아졌는지 확인합니다.
+    inst_improve = False
+    foreign_improve = False
+    inst_worsen = False
+    foreign_worsen = False
+    if inst5 is not None and inst20 is not None:
+        inst_improve = (inst5 / 5) > (inst20 / 20) and inst5 > 0
+        inst_worsen = (inst5 / 5) < (inst20 / 20) and inst5 < 0
+    if foreign5 is not None and foreign20 is not None:
+        foreign_improve = (foreign5 / 5) > (foreign20 / 20) and foreign5 > 0
+        foreign_worsen = (foreign5 / 5) < (foreign20 / 20) and foreign5 < 0
+
+    if pos5 == 2:
+        label = "쌍끌이 매수"
+        score += 14
+    elif neg5 == 2:
+        label = "쌍끌이 매도"
+        score -= 14
+    elif inst_reentry and foreign_reentry:
+        label = "기관·외국인 재진입"
+        score += 12
+    elif inst_reentry:
+        label = "기관 재진입"
+        score += 8
+    elif foreign_reentry:
+        label = "외국인 재진입"
+        score += 8
+    elif inst_exit and foreign_exit:
+        label = "기관·외국인 이탈"
+        score -= 12
+    elif inst_exit:
+        label = "기관 단기이탈"
+        score -= 8
+    elif foreign_exit:
+        label = "외국인 단기이탈"
+        score -= 8
+    elif inst_improve or foreign_improve:
+        label = "수급개선"
+        score += 6
+    elif inst_worsen or foreign_worsen:
+        label = "수급악화"
+        score -= 6
+    else:
+        label = "혼조/중립"
+
+    detail = ", ".join(reasons) if reasons else "기관/외국인 수급 확인"
+    return label, detail, max(0.0, min(100.0, score))
+
+
+def make_price_plan(row: dict) -> tuple[str, str, str]:
+    close = safe_float_value(row.get("현재가"))
+    stop = safe_float_value(row.get("손절가"))
+    high20 = safe_float_value(row.get("20일고점"))
+    ma20 = safe_float_value(row.get("20일선"))
+    ma60 = safe_float_value(row.get("60일선"))
+    fib50 = safe_float_value(row.get("피보50"))
+    rsi = safe_float_value(row.get("RSI"))
+    ret20 = safe_float_value(row.get("20일수익률%"))
+
+    if close is None:
+        return "가격 확인 필요", "손절가 계산 불가", "분할매도 조건 확인 필요"
+
+    if stop is not None and stop > 0:
+        risk_pct = (stop / close - 1) * 100
+        stop_text = f"{format_price(stop)} 이탈 시 방어, 손절폭 {risk_pct:.1f}%"
+    else:
+        stop_text = "손절가 확인 필요"
+
+    action = str(row.get("행동신호", ""))
+    if action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보"]:
+        low = close * 0.985
+        high = close * 1.015
+        buy_zone = f"1차 {format_price(low)}~{format_price(high)} / 종가·거래량 확인"
+    elif high20 is not None and high20 > 0:
+        support = ma20 if ma20 is not None else fib50 if fib50 is not None else ma60
+        if support is not None:
+            buy_zone = f"돌파 {format_price(high20)} 또는 눌림 {format_price(support)} 지지 확인"
+        else:
+            buy_zone = f"20일고점 {format_price(high20)} 돌파 확인"
+    else:
+        buy_zone = "매수 구간 계산 불가"
+
+    sell_bits = []
+    if rsi is not None:
+        sell_bits.append("RSI 75~80 이상 일부익절" if rsi < 75 else "현재 RSI 과열권, 신규매수 주의")
+    if ret20 is not None:
+        sell_bits.append("20일 수익률 25~35% 이상 분할매도" if ret20 < 25 else "20일 급등, 일부익절 검토")
+    sell_zone = " / ".join(sell_bits) if sell_bits else "과열·장대음봉·거래량 폭증 시 분할매도"
+    return buy_zone, stop_text, sell_zone
+
+
+def classify_candidate_grade(row: dict, holding: bool) -> tuple[str, str]:
+    action = str(row.get("행동신호", ""))
+    status = str(row.get("상태", ""))
+    flow_trend = str(row.get("수급변화", ""))
+    structure = safe_float_value(row.get("구조점수"), 0) or 0
+    tech = safe_float_value(row.get("차트점수"), 0) or 0
+    supply = safe_float_value(row.get("종합수급점수"), 50) or 50
+    rsi = safe_float_value(row.get("RSI"), 50) or 50
+    vol = safe_float_value(row.get("거래량배율"), 0) or 0
+    stop_width = safe_float_value(row.get("손절폭%"))
+    stop_risk = abs(stop_width) if stop_width is not None and stop_width < 0 else 99
+
+    buy_action = action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보"]
+    bullish_flow = flow_trend in ["쌍끌이 매수", "기관·외국인 재진입", "기관 재진입", "외국인 재진입", "수급개선"]
+    bearish_flow = flow_trend in ["쌍끌이 매도", "기관·외국인 이탈", "기관 단기이탈", "외국인 단기이탈", "수급악화"]
+    rsi_ok = 38 <= rsi <= 75
+    stop_ok = stop_risk <= 8
+    stop_mid = stop_risk <= 12
+    vol_ok = vol >= 1.2
+
+    checks = [structure >= 65, tech >= 60, supply >= 60, bullish_flow, rsi_ok, vol_ok, stop_ok]
+    passed = sum(bool(x) for x in checks)
+
+    if action in ["손절/비중축소", "전량매도/손절 우선"] or status == "손절위험":
+        return "위험관리", "추세 이탈/손절 신호가 우선이라 신규매수 제외"
+    if status == "추격금지" or action in ["분할매도 우선", "신규매수 금지·분할매도 검토"]:
+        return "추격금지", "과열 구간이라 신규매수보다 보유관리/일부익절 우선"
+    if buy_action and passed >= 6:
+        return "A급 매수 후보", f"핵심조건 {passed}/7 충족: 구조·차트·수급·손절폭이 동시에 양호"
+    if buy_action and passed >= 4 and stop_mid and not bearish_flow:
+        return "B급 매수 후보", f"조건 {passed}/7 충족: 매수 후보지만 일부 조건 확인 필요"
+    if bullish_flow and structure >= 60 and not buy_action:
+        return "수급선행 후보", "차트 확정 전이지만 기관/외국인 수급이 먼저 개선"
+    if buy_action and bearish_flow:
+        return "수급 없는 반등", "차트 신호는 있으나 기관/외국인 수급이 약해 확인 필요"
+    if bearish_flow and tech < 55:
+        return "수급악화 주의", "차트 약화와 수급 이탈이 겹침"
+    if holding:
+        return "보유관리", "보유 기준으로 손절가·코어/트레이딩 비중 관리"
+    return "관찰", "확정 매수 조건 부족"
+
+
+st.title("개인 투자 대시보드 v9 Flow")
 st.caption("네 기준: 내러티브 → 정책/CAPEX → 병목/공급제한 → 지속 매수 주체 → 아직 덜 반영된 구간 → 차트 확인")
 
 with st.expander("이 대시보드가 판단하는 행동 기준", expanded=False):
@@ -950,6 +1141,8 @@ with st.expander("이 대시보드가 판단하는 행동 기준", expanded=Fals
 - **조건 체크리스트**: 종목별 매매 계획에서 20일선, 20일 고점, 거래량, RSI, 피보나치, 수급, 공매도, 손절선을 각각 충족/미충족으로 확인.
 - **전략타입**: 같은 신호라도 종목 성격별로 다르게 해석합니다. 코어보유형은 과열 신호를 전량매도가 아니라 일부 익절/코어 유지로 해석하고, 트레이딩형은 손절과 매도를 더 빠르게 봅니다.
 - **코어/트레이딩 비중**: 코어보유형은 코어 70~80%와 트레이딩 20~30%를 나누어 관리합니다. 추격금지는 신규매수 금지이지, 보유 코어 전량매도라는 뜻이 아닙니다.
+- **수급변화**: 기관5일·외국인5일과 20일 누적을 비교해 쌍끌이 매수, 수급개선, 기관 재진입, 외국인 이탈 같은 흐름을 따로 표시합니다.
+- **후보등급**: 차트·구조·수급·RSI·거래량·손절폭을 합쳐 A급/B급/수급선행/수급 없는 반등/위험관리로 단순화합니다.
         """
     )
 
@@ -1062,6 +1255,8 @@ for i, row in watchlist.iterrows():
 
     flow_reason = str(flow.get("reason") or flow.get("source") or "조회성공") if flow.get("available") else str(flow.get("reason", "데이터없음"))
     short_reason = str(short.get("reason") or short.get("source") or "조회성공") if short.get("available") else str(short.get("reason", "데이터없음"))
+    flow_trend, flow_trend_detail, flow_momentum_score = classify_flow_trend(flow)
+
     pinfo = portfolio_info(ticker, portfolio_map)
     holding = bool(pinfo.get("holding", False))
     avg_price = pinfo.get("avg_price", pd.NA)
@@ -1095,11 +1290,16 @@ for i, row in watchlist.iterrows():
             "공매도점수": round(plan.short_score, 1),
             "종합수급점수": round(plan.supply_score, 1),
             "수급판정": plan.supply_signal,
+            "수급변화": flow_trend,
+            "수급변화요약": flow_trend_detail,
+            "수급모멘텀점수": round(flow_momentum_score, 1),
             "수급데이터상태": flow_reason,
             "공매도판정": plan.short_signal,
             "공매도데이터상태": short_reason,
             "기관5일": flow.get("inst_5d"),
+            "기관20일": flow.get("inst_20d"),
             "외국인5일": flow.get("foreign_5d"),
+            "외국인20일": flow.get("foreign_20d"),
             "연기금20일": flow.get("pension_20d"),
             "기관5일+일수": flow.get("inst_pos_days_5d"),
             "외국인5일+일수": flow.get("foreign_pos_days_5d"),
@@ -1138,6 +1338,13 @@ for i, row in watchlist.iterrows():
             "포트메모": pinfo.get("memo", ""),
             "메모": row.get("notes", ""),
         }
+    buy_zone, stop_plan_text, sell_zone = make_price_plan(row_payload)
+    grade, grade_reason = classify_candidate_grade(row_payload, holding)
+    row_payload["후보등급"] = grade
+    row_payload["등급이유"] = grade_reason
+    row_payload["매수구간"] = buy_zone
+    row_payload["손절계획"] = stop_plan_text
+    row_payload["분할매도구간"] = sell_zone
     decision, today_task, order_prep = build_final_decision(row_payload, holding)
     row_payload["최종판정"] = decision
     row_payload["오늘할일"] = today_task
@@ -1146,7 +1353,21 @@ for i, row in watchlist.iterrows():
     progress.progress((i + 1) / len(watchlist), text=f"계산 중: {row['name']}")
 progress.empty()
 
-result = pd.DataFrame(rows).sort_values(["종합점수"], ascending=False)
+result = pd.DataFrame(rows)
+if not result.empty:
+    grade_order = {
+        "A급 매수 후보": 0,
+        "B급 매수 후보": 1,
+        "수급선행 후보": 2,
+        "수급 없는 반등": 3,
+        "보유관리": 4,
+        "관찰": 5,
+        "추격금지": 6,
+        "수급악화 주의": 7,
+        "위험관리": 8,
+    }
+    result["등급순위"] = result["후보등급"].map(grade_order).fillna(9)
+    result = result.sort_values(["등급순위", "종합점수", "수급모멘텀점수"], ascending=[True, False, False])
 if sector_filter:
     result = result[result["섹터"].isin(sector_filter)]
 if strategy_filter:
@@ -1159,7 +1380,7 @@ if action_filter:
 status_order = ["진입가능", "진입대기", "관심", "관찰", "추격금지", "손절위험", "데이터없음"]
 
 st.subheader("오늘 할 일")
-summary_cols = ["최종판정", "오늘할일", "보유상태", "전략타입", "종목", "현재가", "손절가", "손절폭%", "RSI", "거래량배율", "주문준비"]
+summary_cols = ["후보등급", "최종판정", "오늘할일", "수급변화", "보유상태", "전략타입", "종목", "현재가", "매수구간", "손절가", "손절폭%", "RSI", "거래량배율", "주문준비"]
 
 def _show_task_table(title: str, df: pd.DataFrame, empty_msg: str):
     with st.expander(title, expanded=True):
@@ -1168,32 +1389,40 @@ def _show_task_table(title: str, df: pd.DataFrame, empty_msg: str):
         else:
             st.dataframe(df[summary_cols], use_container_width=True, hide_index=True)
 
+a_df = result[result["후보등급"] == "A급 매수 후보"]
 buy_df = result[result["최종판정"].isin(["신규매수 검토", "조건부 매수대기"])]
+flow_lead_df = result[result["후보등급"].isin(["수급선행 후보", "수급 없는 반등"])]
 manage_df = result[(result["보유상태"] == "보유") & (result["최종판정"].isin(["보유/추가매수 검토", "보유 유지/추가대기", "보유관리", "일부익절/보유관리", "분할매도 검토"]))]
-risk_df = result[result["최종판정"].isin(["트레이딩축소/코어확인", "비중축소 검토", "손절/전량정리 검토", "신규매수 제외"])]
+risk_df = result[result["최종판정"].isin(["트레이딩축소/코어확인", "비중축소 검토", "손절/전량정리 검토", "신규매수 제외"]) | result["후보등급"].isin(["위험관리", "수급악화 주의"])]
 wait_df = result[result["최종판정"].isin(["진입대기", "추격금지", "관찰"])]
 
-t1, t2, t3, t4 = st.tabs(["신규매수/추가 후보", "보유관리", "위험관리", "대기/관찰"] )
+t1, t2, t3, t4, t5 = st.tabs(["A급 후보", "신규매수/추가 후보", "수급선행/수급주의", "보유관리", "위험·대기"] )
 with t1:
+    if a_df.empty:
+        st.caption("A급 후보가 없습니다. 억지로 매수하지 말고 B급/수급선행 후보를 관찰하세요.")
+    else:
+        st.dataframe(a_df[summary_cols], use_container_width=True, hide_index=True)
+with t2:
     if buy_df.empty:
         st.caption("오늘 바로 볼 신규매수 후보가 없습니다.")
     else:
         st.dataframe(buy_df[summary_cols], use_container_width=True, hide_index=True)
-with t2:
+with t3:
+    if flow_lead_df.empty:
+        st.caption("수급선행 또는 수급 없는 반등 후보가 없습니다.")
+    else:
+        st.dataframe(flow_lead_df[summary_cols + ["등급이유"]], use_container_width=True, hide_index=True)
+with t4:
     if manage_df.empty:
         st.caption("보유관리 대상이 없습니다. 보유종목 CSV를 올리면 더 정확해집니다.")
     else:
         st.dataframe(manage_df[summary_cols], use_container_width=True, hide_index=True)
-with t3:
-    if risk_df.empty:
-        st.caption("위험관리 우선 대상이 없습니다.")
+with t5:
+    combined = pd.concat([risk_df, wait_df]).drop_duplicates() if not result.empty else pd.DataFrame()
+    if combined.empty:
+        st.caption("위험/대기 대상이 없습니다.")
     else:
-        st.dataframe(risk_df[summary_cols], use_container_width=True, hide_index=True)
-with t4:
-    if wait_df.empty:
-        st.caption("대기/관찰 대상이 없습니다.")
-    else:
-        st.dataframe(wait_df[summary_cols], use_container_width=True, hide_index=True)
+        st.dataframe(combined[summary_cols], use_container_width=True, hide_index=True)
 
 with st.expander("실전 활용 순서", expanded=False):
     st.markdown("""
@@ -1201,27 +1430,28 @@ with st.expander("실전 활용 순서", expanded=False):
 2. **장중**: 신규매수 후보는 현재가, 거래량배율, 손절폭만 봅니다. 거래량이 안 붙으면 기다립니다.
 3. **보유 종목**: 과열 신호는 전략타입에 따라 일부익절/코어유지/전량정리로 다르게 해석합니다.
 4. **장 마감 후**: 종가 기준으로 조건 체크리스트가 유지됐는지 확인하고, 필요하면 수급 CSV와 포트폴리오 CSV를 업데이트합니다.
-5. **주말**: 백테스트로 종목별 운용 타입을 다시 점검합니다.
+5. **수급 확인**: 쌍끌이 매수/수급개선은 후보를 올려보고, 수급 없는 반등은 종가와 거래량이 확인될 때까지 낮은 비중만 봅니다.
+6. **주말**: 백테스트로 종목별 운용 타입을 다시 점검합니다.
     """)
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("돌파 매수", int(result["행동신호"].isin(["강한 매수 후보", "1차 매수 가능"]).sum()))
-col2.metric("눌림 매수", int((result["행동신호"] == "눌림 매수 후보").sum()))
-col3.metric("수급 우호", int(result["수급판정"].isin(["기관+외국인+연기금 우호", "기관+외국인 동반매수"]).sum()))
-col4.metric("손절/전량매도", int(result["행동신호"].isin(["손절/비중축소", "전량매도/손절 우선"]).sum()))
+col1.metric("A급 후보", int((result["후보등급"] == "A급 매수 후보").sum()))
+col2.metric("쌍끌이 매수", int((result["수급변화"] == "쌍끌이 매수").sum()))
+col3.metric("수급개선/재진입", int(result["수급변화"].isin(["수급개선", "기관 재진입", "외국인 재진입", "기관·외국인 재진입"]).sum()))
+col4.metric("위험/수급악화", int(result["후보등급"].isin(["위험관리", "수급악화 주의"]).sum()))
 
 urgent = result[result["알림우선순위"].isin(["긴급", "높음"])].copy()
 if not urgent.empty:
     st.subheader("우선 확인 신호")
     st.dataframe(
-        urgent[["알림우선순위", "행동신호", "전략타입", "실전해석", "종목", "현재가", "종합수급점수", "수급판정", "공매도판정", "손절가", "강제손절가", "알림이유", "경고"]]
+        urgent[["알림우선순위", "후보등급", "행동신호", "전략타입", "실전해석", "종목", "현재가", "수급변화", "종합수급점수", "수급판정", "손절가", "강제손절가", "알림이유", "경고"]]
         .style.format({"현재가": format_price, "손절가": format_price, "강제손절가": format_price, "종합수급점수": lambda x: format_float(x, 1)}),
         use_container_width=True,
         hide_index=True,
     )
 
 st.subheader("오늘의 후보")
-view_cols = ["최종판정", "오늘할일", "보유상태", "평가손익%", "손절폭%", "행동신호", "전략타입", "실전해석", "알림우선순위", "상태", "종합점수", "종목", "티커", "섹터", "테마", "현재가", "평단가", "손절가", "강제손절가", "RSI", "거래량배율", "20일수익률%", "구조점수", "종합수급점수", "실제수급점수", "수동수급기대", "수급판정", "수급데이터상태", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%", "차트점수", "뉴스점수", "피보구간", "경고"]
+view_cols = ["후보등급", "등급이유", "최종판정", "오늘할일", "보유상태", "평가손익%", "손절폭%", "매수구간", "손절계획", "분할매도구간", "행동신호", "전략타입", "실전해석", "알림우선순위", "상태", "종합점수", "종목", "티커", "섹터", "테마", "현재가", "평단가", "손절가", "강제손절가", "RSI", "거래량배율", "20일수익률%", "구조점수", "종합수급점수", "실제수급점수", "수급모멘텀점수", "수동수급기대", "수급판정", "수급변화", "수급변화요약", "수급데이터상태", "기관5일", "기관20일", "외국인5일", "외국인20일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%", "차트점수", "뉴스점수", "피보구간", "경고"]
 st.dataframe(
     result[view_cols].style.format({
         "현재가": format_price,
@@ -1231,6 +1461,7 @@ st.dataframe(
         "종합점수": lambda x: format_float(x, 1),
         "종합수급점수": lambda x: format_float(x, 1),
         "실제수급점수": lambda x: format_float(x, 1),
+        "수급모멘텀점수": lambda x: format_float(x, 1),
         "수동수급기대": lambda x: format_float(x, 1),
         "RSI": lambda x: format_float(x, 1),
         "거래량배율": lambda x: format_float(x, 2),
@@ -1241,7 +1472,9 @@ st.dataframe(
         "차트점수": lambda x: format_float(x, 1),
         "뉴스점수": lambda x: format_float(x, 1),
         "기관5일": format_money,
+        "기관20일": format_money,
         "외국인5일": format_money,
+        "외국인20일": format_money,
         "연기금20일": format_money,
         "공매도비중%": lambda x: format_percent(x, 2),
         "공매도잔고비중%": lambda x: format_percent(x, 2),
@@ -1252,11 +1485,13 @@ st.dataframe(
 
 with st.expander("KRX 수급/공매도 데이터 진단", expanded=False):
     st.caption("수급이 데이터없음으로 보일 때는 여기서 원인을 확인하세요. 해외주식은 KRX 대상이 아니며, Streamlit Cloud에서 KRX 접속이 실패할 수도 있습니다. 자동 조회가 계속 비면 사이드바의 수급/공매도 CSV 직접 업로드를 사용하세요.")
-    diag_cols = ["종목", "티커", "수급판정", "수급데이터상태", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%"]
+    diag_cols = ["종목", "티커", "수급판정", "수급변화", "수급변화요약", "수급데이터상태", "기관5일", "기관20일", "외국인5일", "외국인20일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%"]
     st.dataframe(
         result[diag_cols].style.format({
             "기관5일": format_money,
+            "기관20일": format_money,
             "외국인5일": format_money,
+            "외국인20일": format_money,
             "연기금20일": format_money,
             "공매도비중%": lambda x: format_percent(x, 2),
             "공매도잔고비중%": lambda x: format_percent(x, 2),
@@ -1281,13 +1516,13 @@ else:
     selected = enrich_selected_with_snapshot(selected, price_data.get(ticker, pd.DataFrame()))
 
     a, b, c, d = st.columns(4)
-    a.metric("최종판정", selected.get("최종판정", "-"))
-    b.metric("보유상태", selected.get("보유상태", "-"))
+    a.metric("후보등급", selected.get("후보등급", "-"))
+    b.metric("최종판정", selected.get("최종판정", "-"))
     c.metric("현재가", format_price(selected["현재가"]))
     d.metric("손절가", format_price(selected["손절가"]))
 
     e, f, g, h = st.columns(4)
-    e.metric("행동신호", selected["행동신호"])
+    e.metric("수급변화", selected.get("수급변화", "-"))
     f.metric("전략타입", selected.get("전략타입", "-"))
     g.metric("손절폭", "-" if pd.isna(selected.get("손절폭%")) else f"{float(selected.get('손절폭%')):.1f}%")
     h.metric("평가손익", "-" if pd.isna(selected.get("평가손익%")) else f"{float(selected.get('평가손익%')):.1f}%")
@@ -1295,6 +1530,11 @@ else:
     st.markdown("#### 전략타입별 실전 해석")
     st.info(str(selected.get("실전해석", "-")))
     st.caption(str(selected.get("보유전략", "-")))
+    st.markdown("#### 매수·손절·분할매도 가격 계획")
+    st.write(f"매수구간: {selected.get('매수구간', '-')}")
+    st.write(f"손절계획: {selected.get('손절계획', '-')}")
+    st.write(f"분할매도구간: {selected.get('분할매도구간', '-')}")
+    st.caption(f"후보등급 이유: {selected.get('등급이유', '-')}")
 
     checklist, checklist_summary = build_condition_checklist(selected)
     s1, s2, s3 = st.columns(3)
@@ -1310,6 +1550,7 @@ else:
 ### {selected['종목']} · {selected['섹터']} · {selected['테마']}
 
 **오늘 할 일**  
+후보등급: {selected.get('후보등급', '-')} · 이유: {selected.get('등급이유', '-')}  
 최종판정: {selected.get('최종판정', '-')}  
 오늘할일: {selected.get('오늘할일', '-')}  
 주문준비: {selected.get('주문준비', '-')}
@@ -1320,18 +1561,22 @@ else:
 코어관리기준: {selected.get('코어관리기준', '-')}
 
 **미보유자 매수 조건**  
-{selected['매수조건']}
+{selected['매수조건']}  
+실전 매수구간: {selected.get('매수구간', '-')}
 
 **보유자 분할매도 조건**  
-{selected['분할매도조건']}
+{selected['분할매도조건']}  
+실전 분할매도구간: {selected.get('분할매도구간', '-')}
 
 **보유자 전량매도 조건**  
 {selected['전량매도조건']}
 
 **수급/공매도 확인**  
-종합수급점수 {selected['종합수급점수']:.1f} · 실제수급점수 {selected['실제수급점수']:.1f} · 수급판정 {selected['수급판정']} · 공매도판정 {selected['공매도판정']}  
+종합수급점수 {selected['종합수급점수']:.1f} · 실제수급점수 {selected['실제수급점수']:.1f} · 수급모멘텀 {selected.get('수급모멘텀점수', 50):.1f} · 수급판정 {selected['수급판정']}  
+수급변화: {selected.get('수급변화', '-')} · {selected.get('수급변화요약', '-')}  
 수급데이터상태: {selected.get('수급데이터상태', '-')} · 공매도데이터상태: {selected.get('공매도데이터상태', '-')}  
-기관5일 {format_money(selected['기관5일'])} · 외국인5일 {format_money(selected['외국인5일'])} · 연기금20일 {format_money(selected['연기금20일'])} · 공매도비중 {selected['공매도비중%'] if pd.notna(selected['공매도비중%']) else '-'}% · 잔고비중 {selected['공매도잔고비중%'] if pd.notna(selected['공매도잔고비중%']) else '-'}%
+기관5일 {format_money(selected['기관5일'])} · 기관20일 {format_money(selected['기관20일'])} · 외국인5일 {format_money(selected['외국인5일'])} · 외국인20일 {format_money(selected['외국인20일'])} · 연기금20일 {format_money(selected['연기금20일'])}  
+공매도판정 {selected['공매도판정']} · 공매도비중 {selected['공매도비중%'] if pd.notna(selected['공매도비중%']) else '-'}% · 잔고비중 {selected['공매도잔고비중%'] if pd.notna(selected['공매도잔고비중%']) else '-'}%
 
 **피보나치 구간**  
 38.2% {format_price(selected['피보38.2'])} · 50% {format_price(selected['피보50'])} · 61.8% {format_price(selected['피보61.8'])} · 현재 피보구간: {selected['피보구간']}
@@ -1373,7 +1618,7 @@ else:
 
 
 st.subheader("백테스트")
-st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. v8 무료 자동수급 버전은 GitHub Actions 수급 캐시·오늘 할 일 요약·보유/미보유 구분·Buy & Hold 비교, 추세보유형, 분할매도+추세보유, 코어보유형 청산을 지원합니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
+st.caption("현재 대시보드의 차트 조건을 과거 일봉에 적용해보는 검증용입니다. v9 수급 강화 버전은 GitHub Actions 수급 캐시·오늘 할 일 요약·보유/미보유 구분·Buy & Hold 비교, 추세보유형, 분할매도+추세보유, 코어보유형 청산을 지원합니다. 수급/뉴스/컨센서스 과거 데이터는 기본 백테스트에 포함되지 않습니다.")
 
 if result.empty:
     st.info("백테스트할 종목이 없습니다.")
