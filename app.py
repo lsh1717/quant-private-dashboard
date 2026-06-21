@@ -633,6 +633,158 @@ def _metric_fmt(value, digits: int = 1, suffix: str = "") -> str:
         return "-"
 
 
+STRATEGY_TYPES = ["코어보유형", "코어+스윙형", "추세스윙형", "트레이딩형", "관찰형"]
+
+
+def infer_strategy_type(row: pd.Series) -> str:
+    """Return a practical strategy type for the stock.
+
+    watchlist.csv의 strategy_type 컬럼이 있으면 그 값을 우선 사용합니다.
+    없으면 섹터/테마/종목 특성으로 기본값을 추정합니다.
+    """
+    raw = str(row.get("strategy_type", "")).strip()
+    aliases = {
+        "core": "코어보유형",
+        "core_hold": "코어보유형",
+        "코어": "코어보유형",
+        "코어보유": "코어보유형",
+        "core_swing": "코어+스윙형",
+        "코어스윙": "코어+스윙형",
+        "swing": "추세스윙형",
+        "추세": "추세스윙형",
+        "스윙": "추세스윙형",
+        "trading": "트레이딩형",
+        "trade": "트레이딩형",
+        "단기": "트레이딩형",
+        "관찰": "관찰형",
+    }
+    if raw:
+        if raw in STRATEGY_TYPES:
+            return raw
+        return aliases.get(raw.lower(), aliases.get(raw, raw if raw else "추세스윙형"))
+
+    ticker = str(row.get("ticker", "")).upper()
+    name = str(row.get("name", ""))
+    sector = str(row.get("sector", ""))
+    theme = str(row.get("theme", ""))
+    text = " ".join([ticker, name, sector, theme])
+    if ticker in ["000660.KS", "005930.KS", "NVDA", "MSFT", "AVGO"] or any(k in text for k in ["HBM", "AI 메모리", "메모리", "빅테크"]):
+        return "코어보유형"
+    if any(k in text for k in ["전력", "변압기", "조선", "방산", "원전"]):
+        return "추세스윙형"
+    if any(k in text for k in ["로봇", "테마", "바이오"]):
+        return "트레이딩형"
+    return "추세스윙형"
+
+
+def strategy_weights(strategy_type: str, row: pd.Series | None = None) -> tuple[int, int]:
+    """Return suggested core/trading weights for interpretation."""
+    try:
+        core = int(float(row.get("core_ratio"))) if row is not None and pd.notna(row.get("core_ratio")) else None
+        trading = int(float(row.get("trading_ratio"))) if row is not None and pd.notna(row.get("trading_ratio")) else None
+        if core is not None and trading is not None:
+            return max(0, min(100, core)), max(0, min(100, trading))
+    except Exception:
+        pass
+    defaults = {
+        "코어보유형": (80, 20),
+        "코어+스윙형": (60, 40),
+        "추세스윙형": (30, 70),
+        "트레이딩형": (0, 100),
+        "관찰형": (0, 0),
+    }
+    return defaults.get(strategy_type, (30, 70))
+
+
+def strategy_management_text(strategy_type: str, core_ratio: int, trading_ratio: int) -> str:
+    if strategy_type == "코어보유형":
+        return (
+            f"코어 {core_ratio}% / 트레이딩 {trading_ratio}% 권장. "
+            "RSI 과열은 전량매도가 아니라 일부 익절 신호로 해석. "
+            "코어 물량은 60일선·120일선·업황/실적 내러티브 훼손 전까지 유지 우선."
+        )
+    if strategy_type == "코어+스윙형":
+        return (
+            f"코어 {core_ratio}% / 스윙 {trading_ratio}% 권장. "
+            "핵심 물량은 중기 추세 유지, 나머지는 눌림·돌파·과열 신호로 관리."
+        )
+    if strategy_type == "추세스윙형":
+        return (
+            f"코어 {core_ratio}% / 스윙 {trading_ratio}% 권장. "
+            "20일선·60일선·피보나치 지지를 적극 확인하고, 과열 후 둔화 시 분할매도."
+        )
+    if strategy_type == "트레이딩형":
+        return (
+            "코어 보유보다 단기 대응 우선. "
+            "손절선 이탈 시 빠르게 정리하고, 과열 신호는 적극 분할/전량매도 후보로 해석."
+        )
+    return "관찰형. 확정 신호가 생기기 전까지 신규매수보다 데이터 확인과 후보 관리 우선."
+
+
+def practical_signal_text(action: str, status: str, strategy_type: str, core_ratio: int, trading_ratio: int) -> str:
+    """Translate the raw signal into strategy-type-specific action text."""
+    action = str(action)
+    if strategy_type == "코어보유형":
+        if action in ["분할매도 우선", "신규매수 금지·분할매도 검토"]:
+            return f"신규매수는 추격금지. 보유자는 트레이딩 물량 중 10~20% 일부 익절 가능. 코어 {core_ratio}%는 60일선/120일선 이탈 전까지 유지 우선."
+        if action in ["손절/비중축소"]:
+            return f"트레이딩 물량 축소 우선. 코어 {core_ratio}%는 60일선 회복 여부와 120일선/업황 훼손을 함께 확인."
+        if action in ["전량매도/손절 우선"]:
+            return "코어까지 정리 검토. 120일선 이탈, 주요 저점 붕괴, 업황/실적 내러티브 훼손이 겹치면 방어 우선."
+        if action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보"]:
+            return f"신규/추가매수는 분할 진입. 코어 후보는 눌림·60일선 지지 확인을 더 선호하고, 추격 비중은 {trading_ratio}% 안에서 제한."
+        if action == "진입대기":
+            return "코어 편입 후보. 돌파보다 눌림 지지, 60일선 유지, 내러티브 유지 여부를 기다림."
+        return "코어보유 관찰. 단기 신호보다 큰 추세와 내러티브 훼손 여부를 우선 확인."
+
+    if strategy_type == "코어+스윙형":
+        if action in ["분할매도 우선", "신규매수 금지·분할매도 검토"]:
+            return f"신규매수는 대기. 스윙 물량 20~30% 익절 검토, 코어 {core_ratio}%는 60일선 이탈 전까지 유지 가능."
+        if action in ["손절/비중축소"]:
+            return "스윙 물량 비중축소. 코어는 60일선/120일선과 수급 악화를 같이 확인."
+        if action in ["전량매도/손절 우선"]:
+            return "스윙은 방어 우선. 코어도 120일선/업황 훼손 확인 후 축소 검토."
+        if action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보"]:
+            return "분할 진입 가능. 1차는 스윙, 지지 확인 후 코어 편입 검토."
+        return "코어+스윙 후보. 확정 신호 전에는 비중을 작게 유지."
+
+    if strategy_type == "추세스윙형":
+        if action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보"]:
+            return "스윙 매수 검토. 1차 진입 후 손절가 이탈 시 빠르게 방어, 60일선 위에서는 추세 유지."
+        if action == "진입대기":
+            return "매수 대기. 20일 고점 돌파+거래량 또는 피보나치 지지 확인 후 진입."
+        if action in ["분할매도 우선", "신규매수 금지·분할매도 검토"]:
+            return "보유자는 20~30% 분할매도 검토. 신규매수는 눌림까지 대기."
+        if action in ["손절/비중축소", "전량매도/손절 우선"]:
+            return "스윙 전략상 방어 우선. 손절가/60일선/20일저점 이탈이면 비중축소 또는 정리."
+        return "관찰. 스윙 조건이 충족될 때까지 대기."
+
+    if strategy_type == "트레이딩형":
+        if action in ["강한 매수 후보", "1차 매수 가능", "눌림 매수 후보"]:
+            return "단기 진입 가능. 반드시 손절가를 먼저 정하고, 과열 신호가 나오면 빠르게 분할매도."
+        if action in ["진입대기", "관심·반등 확인"]:
+            return "아직 매수 아님. 확정 돌파/반등 확인 전까지 대기."
+        if action in ["분할매도 우선", "신규매수 금지·분할매도 검토"]:
+            return "신규매수 금지. 보유자는 적극 분할매도 또는 단기 정리 검토."
+        if action in ["손절/비중축소", "전량매도/손절 우선"]:
+            return "손절/정리 우선. 반등 기대보다 원금 방어를 우선."
+        return "단기 관찰. 신호 없으면 매매하지 않음."
+
+    return "관찰형. 신규매수보다 후보 유지와 조건 확인 우선."
+
+
+def strategy_stop_text(strategy_type: str) -> str:
+    if strategy_type == "코어보유형":
+        return "코어 전량매도는 120일선 이탈, 주요 저점 붕괴, 업황·실적 내러티브 훼손이 겹칠 때만 검토. 20일선 이탈은 트레이딩 물량 축소 신호로 우선 해석."
+    if strategy_type == "코어+스윙형":
+        return "스윙 물량은 20일선/손절가 기준으로 관리. 코어 물량은 60일선·120일선과 수급 악화를 같이 확인."
+    if strategy_type == "추세스윙형":
+        return "60일선 이탈, 20일 저점 이탈, 피보나치 61.8% 이탈 후 회복 실패 시 비중축소/정리."
+    if strategy_type == "트레이딩형":
+        return "손절가 이탈 시 빠르게 정리. 과열 신호는 일부가 아니라 적극 매도 후보로 해석."
+    return "확정 신호 전까지 보수적으로 관찰."
+
+
 st.title("개인 투자 대시보드")
 st.caption("네 기준: 내러티브 → 정책/CAPEX → 병목/공급제한 → 지속 매수 주체 → 아직 덜 반영된 구간 → 차트 확인")
 
@@ -648,6 +800,8 @@ with st.expander("이 대시보드가 판단하는 행동 기준", expanded=Fals
 - **손절/비중축소**: 20일선과 60일선을 동시에 이탈해 진입 근거가 약해진 상태.
 - **전량매도/손절 우선**: 20일 최저가 또는 피보나치 61.8%/핵심 지지선 붕괴. 알림이 늦을 수 있으므로 가격 조건을 미리 정해두고 대응.
 - **조건 체크리스트**: 종목별 매매 계획에서 20일선, 20일 고점, 거래량, RSI, 피보나치, 수급, 공매도, 손절선을 각각 충족/미충족으로 확인.
+- **전략타입**: 같은 신호라도 종목 성격별로 다르게 해석합니다. 코어보유형은 과열 신호를 전량매도가 아니라 일부 익절/코어 유지로 해석하고, 트레이딩형은 손절과 매도를 더 빠르게 봅니다.
+- **코어/트레이딩 비중**: 코어보유형은 코어 70~80%와 트레이딩 20~30%를 나누어 관리합니다. 추격금지는 신규매수 금지이지, 보유 코어 전량매도라는 뜻이 아닙니다.
         """
     )
 
@@ -676,6 +830,16 @@ uploaded = st.sidebar.file_uploader("관심종목 CSV 교체", type=["csv"])
 if uploaded is not None:
     watchlist = pd.read_csv(uploaded)
 
+# v6.5: 종목별 전략타입을 지원합니다. 기존 watchlist.csv를 올려도 자동으로 기본값을 채웁니다.
+if "strategy_type" not in watchlist.columns:
+    watchlist["strategy_type"] = watchlist.apply(infer_strategy_type, axis=1)
+else:
+    watchlist["strategy_type"] = watchlist.apply(infer_strategy_type, axis=1)
+if "core_ratio" not in watchlist.columns:
+    watchlist["core_ratio"] = pd.NA
+if "trading_ratio" not in watchlist.columns:
+    watchlist["trading_ratio"] = pd.NA
+
 manual_supply_upload = st.sidebar.file_uploader(
     "수급/공매도 CSV 직접 업로드",
     type=["csv"],
@@ -686,6 +850,7 @@ if manual_supply_map:
     st.sidebar.success(f"수동 수급 CSV {len(manual_supply_map)}개 티커 인식")
 
 sector_filter = st.sidebar.multiselect("섹터 필터", sorted(watchlist["sector"].unique().tolist()), default=[])
+strategy_filter = st.sidebar.multiselect("전략타입 필터", [x for x in STRATEGY_TYPES if x in set(watchlist["strategy_type"].astype(str))] or STRATEGY_TYPES, default=[])
 status_filter = st.sidebar.multiselect("상태 필터", ["진입가능", "진입대기", "관심", "관찰", "추격금지", "손절위험", "데이터없음"], default=[])
 action_filter = st.sidebar.multiselect(
     "행동 신호 필터",
@@ -720,6 +885,11 @@ for i, row in watchlist.iterrows():
         # 수동 CSV가 있으면 자동 KRX 조회 결과보다 우선합니다.
         flow_pack = manual_pack
     plan = build_trade_plan(row, snap, structure, tech, ns, flow_pack=flow_pack)
+    strategy_type = infer_strategy_type(row)
+    core_ratio, trading_ratio = strategy_weights(strategy_type, row)
+    practical_signal = practical_signal_text(plan.action, plan.status, strategy_type, core_ratio, trading_ratio)
+    management_text = strategy_management_text(strategy_type, core_ratio, trading_ratio)
+    core_stop_text = strategy_stop_text(strategy_type)
     flow = flow_pack.get("flow", {}) or {}
     short = flow_pack.get("short", {}) or {}
 
@@ -769,6 +939,12 @@ for i, row in watchlist.iterrows():
             "피보구간": "예" if snap.get("fib_zone") else "아니오",
             "뉴스수": article_count,
             "행동신호": plan.action,
+            "전략타입": strategy_type,
+            "코어비중%": core_ratio,
+            "트레이딩비중%": trading_ratio,
+            "실전해석": practical_signal,
+            "보유전략": management_text,
+            "코어관리기준": core_stop_text,
             "알림우선순위": plan.alert_priority,
             "알림이유": plan.alert_reason,
             "손절가": plan.stop_price,
@@ -789,6 +965,8 @@ progress.empty()
 result = pd.DataFrame(rows).sort_values(["종합점수"], ascending=False)
 if sector_filter:
     result = result[result["섹터"].isin(sector_filter)]
+if strategy_filter:
+    result = result[result["전략타입"].isin(strategy_filter)]
 if status_filter:
     result = result[result["상태"].isin(status_filter)]
 if action_filter:
@@ -806,14 +984,14 @@ urgent = result[result["알림우선순위"].isin(["긴급", "높음"])].copy()
 if not urgent.empty:
     st.subheader("우선 확인 신호")
     st.dataframe(
-        urgent[["알림우선순위", "행동신호", "종목", "현재가", "종합수급점수", "수급판정", "공매도판정", "손절가", "강제손절가", "알림이유", "경고"]]
+        urgent[["알림우선순위", "행동신호", "전략타입", "실전해석", "종목", "현재가", "종합수급점수", "수급판정", "공매도판정", "손절가", "강제손절가", "알림이유", "경고"]]
         .style.format({"현재가": format_price, "손절가": format_price, "강제손절가": format_price, "종합수급점수": lambda x: format_float(x, 1)}),
         use_container_width=True,
         hide_index=True,
     )
 
 st.subheader("오늘의 후보")
-view_cols = ["행동신호", "알림우선순위", "상태", "종합점수", "종목", "티커", "섹터", "테마", "현재가", "손절가", "강제손절가", "RSI", "거래량배율", "20일수익률%", "구조점수", "종합수급점수", "실제수급점수", "수동수급기대", "수급판정", "수급데이터상태", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%", "차트점수", "뉴스점수", "피보구간", "경고"]
+view_cols = ["행동신호", "전략타입", "실전해석", "알림우선순위", "상태", "종합점수", "종목", "티커", "섹터", "테마", "현재가", "손절가", "강제손절가", "RSI", "거래량배율", "20일수익률%", "구조점수", "종합수급점수", "실제수급점수", "수동수급기대", "수급판정", "수급데이터상태", "기관5일", "외국인5일", "연기금20일", "공매도판정", "공매도데이터상태", "공매도비중%", "공매도잔고비중%", "차트점수", "뉴스점수", "피보구간", "경고"]
 st.dataframe(
     result[view_cols].style.format({
         "현재가": format_price,
@@ -871,9 +1049,19 @@ else:
 
     a, b, c, d = st.columns(4)
     a.metric("행동 신호", selected["행동신호"])
-    b.metric("종합점수", f"{selected['종합점수']:.1f}")
+    b.metric("전략타입", selected.get("전략타입", "-"))
     c.metric("현재가", format_price(selected["현재가"]))
     d.metric("손절가", format_price(selected["손절가"]))
+
+    e, f, g, h = st.columns(4)
+    e.metric("종합점수", f"{selected['종합점수']:.1f}")
+    f.metric("코어비중", f"{int(selected.get('코어비중%', 0))}%")
+    g.metric("트레이딩비중", f"{int(selected.get('트레이딩비중%', 0))}%")
+    h.metric("상태", selected.get("상태", "-"))
+
+    st.markdown("#### 전략타입별 실전 해석")
+    st.info(str(selected.get("실전해석", "-")))
+    st.caption(str(selected.get("보유전략", "-")))
 
     checklist, checklist_summary = build_condition_checklist(selected)
     s1, s2, s3 = st.columns(3)
@@ -887,6 +1075,11 @@ else:
 
     st.markdown(f"""
 ### {selected['종목']} · {selected['섹터']} · {selected['테마']}
+
+**전략타입 / 물량 관리**  
+전략타입: {selected.get('전략타입', '-')} · 코어 {selected.get('코어비중%', 0)}% / 트레이딩 {selected.get('트레이딩비중%', 0)}%  
+실전해석: {selected.get('실전해석', '-')}  
+코어관리기준: {selected.get('코어관리기준', '-')}
 
 **미보유자 매수 조건**  
 {selected['매수조건']}
