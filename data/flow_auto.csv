@@ -1,1 +1,11 @@
-ticker,종목,updated_at,기관5일,기관20일,외국인5일,외국인20일,연기금5일,연기금20일,공매도비중%,공매도잔고비중%,잔고증감5일%p,수급데이터상태,공매도데이터상태
+﻿ticker,종목,updated_at,기관5일,기관20일,외국인5일,외국인20일,연기금5일,연기금20일,공매도비중%,공매도잔고비중%,잔고증감5일%p,수급데이터상태,공매도데이터상태
+000660.KS,SK하이닉스,2026-06-21T15:18:49,1831259.0,2767469.0,-1489020.0,-3901308.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
+005930.KS,삼성전자,2026-06-21T15:18:49,3751666.0,13697166.0,-3302836.0,-39299450.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
+042700.KS,한미반도체,2026-06-21T15:18:49,-995392.0,-3336307.0,-393634.0,598840.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
+010120.KS,LS ELECTRIC,2026-06-21T15:18:49,-265461.0,-1651159.0,-71237.0,1287098.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
+267260.KS,HD현대일렉트릭,2026-06-21T15:18:49,-19856.0,327049.0,-102714.0,-459940.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
+298040.KS,효성중공업,2026-06-21T15:18:49,-18085.0,-482.0,-25123.0,-28880.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
+034020.KS,두산에너빌리티,2026-06-21T15:18:49,-551916.0,-1585569.0,-982911.0,-5987278.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
+329180.KS,HD현대중공업,2026-06-21T15:18:49,141945.0,284758.0,-37422.0,-31934.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
+012450.KS,한화에어로스페이스,2026-06-21T15:18:49,-73521.0,-160312.0,10974.0,126377.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
+277810.KS,레인보우로보틱스,2026-06-21T15:18:49,5315.0,-31542.0,-63947.0,-208990.0,,,,,,Naver Finance 수급 사용(pykrx 빈값 fallback),공매도 거래 조회 실패: get_shorting_volume_by_date: '거래량'; get_shorting_value_by_date: '거래대금'
